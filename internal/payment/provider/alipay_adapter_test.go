@@ -2,12 +2,21 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
 	"github.com/dujiao-next/internal/payment/alipay"
+
+	"github.com/shopspring/decimal"
 )
 
 func TestAlipayAdapter_Type(t *testing.T) {
@@ -85,6 +94,92 @@ func TestAlipayAdapter_ValidateConfig_EmptyInteractionModeUsesDefault(t *testing
 	if err != nil {
 		t.Fatalf("ValidateConfig() should use QR default when interactionMode is empty, got: %v", err)
 	}
+}
+
+// TestAlipayAdapter_CreatePayment_ExchangeRate_AuditFields 守护 P1.2c audit
+// 字段写入回归。模式见 stripe_adapter_test.go 同名测试。
+func TestAlipayAdapter_CreatePayment_ExchangeRate_AuditFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 模拟 alipay precreate(QR mode)成功响应
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"alipay_trade_precreate_response": map[string]any{
+				"code":         "10000",
+				"msg":          "Success",
+				"out_trade_no": "ORDER-ALIPAY-AUDIT",
+				"trade_no":     "20260516000001",
+				"qr_code":      "https://qr.alipay.com/audit-001",
+			},
+			"sign": "test-sign",
+		})
+	}))
+	defer server.Close()
+
+	privateKeyPEM, publicKeyPEM := buildAlipayTestKeyPair(t)
+
+	a := NewAlipayAdapter()
+	raw := models.JSON{
+		"app_id":            "2026000000000000",
+		"private_key":       privateKeyPEM,
+		"alipay_public_key": publicKeyPEM,
+		"gateway_url":       server.URL,
+		"notify_url":        "https://example.com/api/v1/payments/callback",
+		"sign_type":         "RSA2",
+		// 跨币种:10 USD → 72 CNY (rate 7.2)
+		"target_currency": "CNY",
+		"exchange_rate":   "7.2",
+	}
+
+	input := CreateInput{
+		OrderNo:   "ORDER-ALIPAY-USD-10",
+		Subject:   "audit field test",
+		Currency:  "USD",
+		Amount:    models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
+		Extra:     models.JSON{"interaction_mode": constants.PaymentInteractionQR},
+		NotifyURL: "https://example.com/api/v1/payments/callback",
+	}
+
+	result, err := a.CreatePayment(context.Background(), raw, input)
+	if err != nil {
+		t.Fatalf("CreatePayment() failed: %v", err)
+	}
+
+	if result.CurrencySent != "CNY" {
+		t.Fatalf("CurrencySent = %q, want CNY (converted target)", result.CurrencySent)
+	}
+	if result.AmountSent != "72" {
+		t.Fatalf("AmountSent = %q, want 72 (10 USD * 7.2)", result.AmountSent)
+	}
+
+	if got := result.Payload["exchange_rate"]; got != "7.2" {
+		t.Fatalf("Payload[exchange_rate] = %v, want 7.2", got)
+	}
+	if got := result.Payload["original_amount"]; got != "10" {
+		t.Fatalf("Payload[original_amount] = %v, want 10", got)
+	}
+	if got := result.Payload["original_currency"]; got != "USD" {
+		t.Fatalf("Payload[original_currency] = %v, want USD", got)
+	}
+}
+
+// buildAlipayTestKeyPair 为 wrapper 测试生成临时 RSA2 密钥对。
+// 等价于 alipay/alipay_test.go 的 buildTestConfig 中的密钥生成代码。
+func buildAlipayTestKeyPair(t *testing.T) (privateKeyPEM, publicKeyPEM string) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	publicKeyDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	privateKeyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKeyDER}))
+	publicKeyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicKeyDER}))
+	return
 }
 
 func TestAlipayAdapter_MapAlipayError(t *testing.T) {

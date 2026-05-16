@@ -7,12 +7,16 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
 	"github.com/dujiao-next/internal/payment/wechatpay"
+
+	"github.com/shopspring/decimal"
 )
 
 // buildTestRSAPrivateKeyPEM 生成 PKCS8 格式 RSA 2048 私钥 PEM，用于 adapter 单元测试。
@@ -134,6 +138,60 @@ func TestWechatpayAdapter_ParseWebhook_NotBlockedByInteractionMode(t *testing.T)
 	// C2 修复后：应当是 ErrSignatureInvalid 或 ErrResponseInvalid，不应是 ErrConfigInvalid
 	if errors.Is(err, ErrConfigInvalid) {
 		t.Fatalf("ParseWebhook should NOT fail with ErrConfigInvalid after C2 fix, got: %v", err)
+	}
+}
+
+// TestWechatpayAdapter_CreatePayment_ExchangeRate_AuditFields 守护 P1.2c audit
+// 字段写入回归。模式见 stripe_adapter_test.go 同名测试。
+// 用 QR 模式触发 /v3/pay/transactions/native;httptest 返回 code_url 让
+// wechatpay native 解析成功,进入 wrapper 的 audit 写入块。
+func TestWechatpayAdapter_CreatePayment_ExchangeRate_AuditFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/pay/transactions/native" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code_url":"weixin://wxpay/bizpayurl?pr=audit001","prepay_id":"wx-audit-001"}`))
+	}))
+	defer server.Close()
+
+	raw := buildMinimalWechatRaw(t)
+	raw["base_url"] = server.URL
+	// 跨币种:10 USD → 72 CNY (rate 7.2)
+	raw["target_currency"] = "CNY"
+	raw["exchange_rate"] = "7.2"
+
+	a := NewWechatpayAdapter()
+	input := CreateInput{
+		OrderNo:   "ORDER-WX-USD-10",
+		Subject:   "audit field test",
+		Currency:  "USD",
+		Amount:    models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
+		ClientIP:  "127.0.0.1",
+		Extra:     models.JSON{"interaction_mode": constants.PaymentInteractionQR},
+		NotifyURL: "https://example.com/api/v1/payments/webhook/wechat",
+	}
+
+	result, err := a.CreatePayment(context.Background(), raw, input)
+	if err != nil {
+		t.Fatalf("CreatePayment() failed: %v", err)
+	}
+
+	if result.CurrencySent != "CNY" {
+		t.Fatalf("CurrencySent = %q, want CNY (converted target)", result.CurrencySent)
+	}
+	if result.AmountSent != "72" {
+		t.Fatalf("AmountSent = %q, want 72 (10 USD * 7.2)", result.AmountSent)
+	}
+
+	if got := result.Payload["exchange_rate"]; got != "7.2" {
+		t.Fatalf("Payload[exchange_rate] = %v, want 7.2", got)
+	}
+	if got := result.Payload["original_amount"]; got != "10" {
+		t.Fatalf("Payload[original_amount] = %v, want 10", got)
+	}
+	if got := result.Payload["original_currency"]; got != "USD" {
+		t.Fatalf("Payload[original_currency] = %v, want USD", got)
 	}
 }
 
