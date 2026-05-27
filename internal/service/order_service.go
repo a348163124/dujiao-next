@@ -35,6 +35,7 @@ type OrderService struct {
 	affiliateSvc          *AffiliateService
 	memberLevelService    *MemberLevelService
 	riskControlSvc        *OrderRiskControlService
+	productMappingService *ProductMappingService
 	expireMinutes         int
 }
 
@@ -57,7 +58,17 @@ type OrderServiceOptions struct {
 	AffiliateService      *AffiliateService
 	MemberLevelService    *MemberLevelService
 	RiskControlService    *OrderRiskControlService
+	ProductMappingService *ProductMappingService
 	ExpireMinutes         int
+}
+
+// SetProductMappingService 注入商品映射服务（用于下单前上游库存兜底校验）。
+// 由 provider 在 ProductMappingService 构造之后调用，避免构造顺序耦合。
+func (s *OrderService) SetProductMappingService(svc *ProductMappingService) {
+	if s == nil {
+		return
+	}
+	s.productMappingService = svc
 }
 
 // NewOrderService 创建订单服务
@@ -80,6 +91,7 @@ func NewOrderService(opts OrderServiceOptions) *OrderService {
 		affiliateSvc:          opts.AffiliateService,
 		memberLevelService:    opts.MemberLevelService,
 		riskControlSvc:        opts.RiskControlService,
+		productMappingService: opts.ProductMappingService,
 		expireMinutes:         opts.ExpireMinutes,
 	}
 }

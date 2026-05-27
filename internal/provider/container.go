@@ -300,6 +300,8 @@ func (c *Container) initServices() {
 	c.SiteConnectionService = service.NewSiteConnectionService(c.SiteConnectionRepo, c.Config.App.SecretKey, "uploads")
 	c.ProductMappingService = service.NewProductMappingService(c.ProductMappingRepo, c.SKUMappingRepo, c.ProductRepo, c.ProductSKURepo, c.CategoryRepo, c.SiteConnectionService)
 	c.ProductMappingService.SetCategoryService(c.CategoryService)
+	c.ProductMappingService.SetSettingService(c.SettingService)
+	c.OrderService.SetProductMappingService(c.ProductMappingService)
 	c.DownstreamCallbackService = service.NewDownstreamCallbackService(c.DownstreamOrderRefRepo, c.OrderRepo, c.ApiCredentialRepo, c.QueueClient)
 	c.PaymentService = service.NewPaymentService(service.PaymentServiceOptions{
 		OrderRepo:               c.OrderRepo,

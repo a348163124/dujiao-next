@@ -293,9 +293,98 @@ func (s *ProductMappingService) SyncAllStock() error {
 	return errors.Join(errs...)
 }
 
-// fullSyncInterval 强制全量同步间隔：超过此时长后下次同步必走全量，
-// 用于发现上游下架/删除（增量模式下这些商品不会再次出现在 updated_after 之后的列表里）
-const fullSyncInterval = 24 * time.Hour
+// EnsureUpstreamStockForOrder 下单前对上游履约 SKU 进行库存兜底校验。
+//
+// 语义（失败优先安全开放，避免上游抖动导致全站不能下单）：
+//   - 该 SKU 没有上游映射 → 视为非上游商品，返回 nil（不做任何事）
+//   - 本地缓存 upstream_stock == -1 → 上游无限库存，返回 nil
+//   - 本地缓存 upstream_stock >= requiredQty → 缓存充足，返回 nil
+//   - 否则触发实时同步上游单品，再读缓存：
+//     · 同步失败 → 返回 nil（容忍上游抖动，让缓存继续兜底）
+//     · 同步后仍 < requiredQty → 返回 ErrUpstreamStockInsufficient
+//
+// 后台 "pre_order_stock_check_enabled" 关闭时整个方法直接返回 nil。
+func (s *ProductMappingService) EnsureUpstreamStockForOrder(localSKUID uint, requiredQty int) error {
+	if s == nil || s.skuMappingRepo == nil || localSKUID == 0 || requiredQty <= 0 {
+		return nil
+	}
+
+	// 后台总开关
+	if s.settingService != nil {
+		cfg, err := s.settingService.GetUpstreamSyncConfig("")
+		if err == nil && !cfg.PreOrderStockCheckEnabled {
+			return nil
+		}
+	}
+
+	skuMapping, err := s.skuMappingRepo.GetByLocalSKUID(localSKUID)
+	if err != nil {
+		// 查库失败不阻断下单
+		logger.Warnw("preorder_stock_check_sku_mapping_lookup_failed", "local_sku_id", localSKUID, "error", err)
+		return nil
+	}
+	if skuMapping == nil {
+		// 没有上游映射 = 非上游商品
+		return nil
+	}
+	if skuMapping.UpstreamStock < 0 {
+		// 无限库存
+		return nil
+	}
+	if skuMapping.UpstreamStock >= requiredQty {
+		return nil
+	}
+
+	// 缓存库存不足 → 实时同步上游商品
+	if syncErr := s.SyncProduct(skuMapping.ProductMappingID); syncErr != nil {
+		// 上游抖动：fail-open，记录但不阻断下单
+		logger.Warnw("preorder_stock_check_realtime_sync_failed",
+			"local_sku_id", localSKUID,
+			"product_mapping_id", skuMapping.ProductMappingID,
+			"required_qty", requiredQty,
+			"cached_stock", skuMapping.UpstreamStock,
+			"error", syncErr,
+		)
+		return nil
+	}
+
+	// 重新读取最新缓存
+	refreshed, err := s.skuMappingRepo.GetByLocalSKUID(localSKUID)
+	if err != nil || refreshed == nil {
+		logger.Warnw("preorder_stock_check_refresh_failed", "local_sku_id", localSKUID, "error", err)
+		return nil
+	}
+	if refreshed.UpstreamStock < 0 || refreshed.UpstreamStock >= requiredQty {
+		return nil
+	}
+	return ErrUpstreamStockInsufficient
+}
+
+// fullSyncIntervalFloor 强制全量同步的下限：任何情况下两次全量间隔至少 24h，
+// 用于发现上游下架/删除（增量模式下这些商品不会再次出现在 updated_after 之后的列表里）。
+const fullSyncIntervalFloor = 24 * time.Hour
+
+// fullSyncIntervalSyncMultiplier 全量间隔相对增量同步间隔的倍数。
+// 例如增量间隔=6h 时，全量间隔=max(24h, 6h*3)=24h；增量=12h 时，全量=max(24h, 36h)=36h。
+const fullSyncIntervalSyncMultiplier = 3
+
+// computeFullSyncInterval 计算当前强制全量同步间隔，跟随后台配置的同步间隔联动。
+// 保证 ≥ 24h，避免用户把同步间隔调到 30h 时全量阈值（24h）反而每次都触发。
+func (s *ProductMappingService) computeFullSyncInterval() time.Duration {
+	floor := fullSyncIntervalFloor
+	if s == nil || s.settingService == nil {
+		return floor
+	}
+	syncInterval, err := s.settingService.GetUpstreamSyncInterval("")
+	if err != nil || syncInterval <= 0 {
+		return floor
+	}
+	scaled := syncInterval * time.Duration(fullSyncIntervalSyncMultiplier)
+	if scaled > floor {
+		return scaled
+	}
+	return floor
+}
 
 // syncConnectionStock 按连接批量同步：一次 ListProducts 拉取所有商品，内存匹配映射
 func (s *ProductMappingService) syncConnectionStock(connectionID uint, connMappings []models.ProductMapping) error {
@@ -322,12 +411,14 @@ func (s *ProductMappingService) syncConnectionStock(connectionID uint, connMappi
 		}
 	}
 
-	// 距离上次全量超过阈值则强制走全量，用于发现上游下架/删除
+	// 距离上次全量超过阈值则强制走全量，用于发现上游下架/删除。
+	// 全量间隔跟随增量同步间隔联动（≥24h），避免用户把间隔调长后全量反而每次都触发。
+	fullSyncInterval := s.computeFullSyncInterval()
 	if updatedAfter != nil {
 		if lastFullStr, err := cache.GetString(syncCtx, lastFullSyncKey); err == nil && lastFullStr != "" {
 			if t, parseErr := time.Parse(time.RFC3339, lastFullStr); parseErr == nil {
 				if time.Since(t) >= fullSyncInterval {
-					logger.Infow("sync_force_full", "connection_id", connectionID, "last_full_sync", t)
+					logger.Infow("sync_force_full", "connection_id", connectionID, "last_full_sync", t, "full_sync_interval", fullSyncInterval)
 					updatedAfter = nil
 				}
 			}
@@ -341,10 +432,15 @@ func (s *ProductMappingService) syncConnectionStock(connectionID uint, connMappi
 
 	// 批量拉取上游商品（分页）。include_inactive=true 让上游连同已下架商品一起返回，
 	// 下游凭此识别"上游已下架"和"上游已删除"两种状态。
+	// fetchComplete 表示是否拉满了 result.Total —— 只有完整拉取才允许根据 missing 推断"上游已删除"，
+	// 否则上游分页限流/截断/缓存抖动等会导致大量 mapping 被误标为 deleted。
 	upstreamProducts := make(map[uint]upstream.UpstreamProduct)
 	includesInactive := false
+	fetchComplete := false
+	expectedTotal := 0
 	page := 1
 	const pageSize = 50
+	const maxPages = 200
 	for {
 		ctx, cancel := context.WithTimeout(syncCtx, 30*time.Second)
 		result, err := adapter.ListProducts(ctx, upstream.ListProductsOpts{
@@ -361,6 +457,7 @@ func (s *ProductMappingService) syncConnectionStock(connectionID uint, connMappi
 				updatedAfter = nil
 				page = 1
 				upstreamProducts = make(map[uint]upstream.UpstreamProduct)
+				expectedTotal = 0
 				continue
 			}
 			return fmt.Errorf("list upstream products page %d: %w", page, err)
@@ -369,17 +466,35 @@ func (s *ProductMappingService) syncConnectionStock(connectionID uint, connMappi
 		// 上游回声字段：旧版上游不识别 include_inactive，会返回 false
 		if page == 1 {
 			includesInactive = result.IncludesInactive
+			expectedTotal = result.Total
 		}
 
 		for _, p := range result.Items {
 			upstreamProducts[p.ID] = p
 		}
 
-		if len(upstreamProducts) >= result.Total || len(result.Items) == 0 {
+		if len(upstreamProducts) >= result.Total {
+			fetchComplete = true
+			break
+		}
+		if len(result.Items) == 0 {
+			// 上游声称 total 还有但本页返回空 —— 视为分页异常截断，不允许进入删除判定
+			logger.Warnw("sync_pagination_truncated",
+				"connection_id", connectionID,
+				"page", page,
+				"fetched", len(upstreamProducts),
+				"expected_total", result.Total,
+			)
 			break
 		}
 		page++
-		if page > 200 { // 安全限制
+		if page > maxPages {
+			logger.Warnw("sync_pagination_max_pages_reached",
+				"connection_id", connectionID,
+				"max_pages", maxPages,
+				"fetched", len(upstreamProducts),
+				"expected_total", expectedTotal,
+			)
 			break
 		}
 	}
@@ -403,18 +518,20 @@ func (s *ProductMappingService) syncConnectionStock(connectionID uint, connMappi
 				// 增量模式下未返回说明没有变化，跳过
 				continue
 			}
-			// 全量模式 + 上游真实支持 include_inactive：下架商品也应在列表中，
-			// 仍然 missing 即说明上游已软删除。
-			if includesInactive {
+			// 全量模式 + 上游真实支持 include_inactive + 本次拉取完整：
+			// 下架商品也应在列表中，仍然 missing 即说明上游已软删除。
+			if includesInactive && fetchComplete {
 				_ = s.markUpstreamUnavailable(mapping, models.UpstreamStatusDeleted, now)
 				continue
 			}
-			// 旧上游不支持 include_inactive，无法区分"下架"和"删除"，
-			// 仅打日志告警避免误下架（管理员可手动同步触发判定）。
-			logger.Warnw("sync_upstream_product_missing_legacy",
+			// 拉取不完整（分页异常 / 翻页超限）或旧上游不支持 include_inactive：
+			// 无法可靠判定"上游已删除"，仅打日志告警避免误下架。
+			logger.Warnw("sync_upstream_product_missing_skipped",
 				"connection_id", connectionID,
 				"upstream_product_id", mapping.UpstreamProductID,
 				"local_product_id", mapping.LocalProductID,
+				"includes_inactive", includesInactive,
+				"fetch_complete", fetchComplete,
 			)
 			continue
 		}
@@ -438,6 +555,7 @@ func (s *ProductMappingService) syncConnectionStock(connectionID uint, connMappi
 		"upstream_fetched", len(upstreamProducts),
 		"incremental", !isFullSync,
 		"includes_inactive", includesInactive,
+		"fetch_complete", fetchComplete,
 	)
 	return nil
 }

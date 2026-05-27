@@ -425,6 +425,173 @@ func TestSyncConnectionStockKeepsLegacyUpstreamMissing(t *testing.T) {
 	}
 }
 
+func TestSyncConnectionStockKeepsMappingWhenFullSyncIncomplete(t *testing.T) {
+	// 模拟上游分页返回不完整：page=1 返回 total=10 但只回 1 条（不含我们的 mapping），
+	// page=2 异常返回 items=[] —— 当前实现会因 items==0 提前 break，
+	// 然后把所有未在列表中的 mapping 错误地标为 deleted。
+	// 期望：检测到拉取不完整 → 跳过删除判定，保留原状态。
+	var pageCalls int
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		pageCalls++
+		w.Header().Set("Content-Type", "application/json")
+		if pageCalls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"items": []upstream.UpstreamProduct{
+					{ID: 999, Title: models.JSON{"zh-CN": "其他商品"}, PriceAmount: "1.00", IsActive: true},
+				},
+				"total":             10,
+				"page":              1,
+				"page_size":         50,
+				"includes_inactive": true,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":                true,
+			"items":             []upstream.UpstreamProduct{},
+			"total":             10,
+			"page":              pageCalls,
+			"page_size":         50,
+			"includes_inactive": true,
+		})
+	}
+
+	svc, db, mapping, cleanup := setupMappingWithUpstreamHandler(t,
+		"file:sync_incomplete_no_delete?mode=memory&cache=shared",
+		handler,
+	)
+	defer cleanup()
+
+	if err := svc.syncConnectionStock(mapping.ConnectionID, []models.ProductMapping{*mapping}); err != nil {
+		t.Fatalf("syncConnectionStock returned error: %v", err)
+	}
+
+	var got models.ProductMapping
+	if err := db.First(&got, mapping.ID).Error; err != nil {
+		t.Fatalf("reload mapping failed: %v", err)
+	}
+	if got.UpstreamStatus != models.UpstreamStatusActive {
+		t.Fatalf("incomplete full sync must not mark missing mapping as deleted, got %q", got.UpstreamStatus)
+	}
+	if !got.IsActive {
+		t.Fatalf("incomplete full sync must not deactivate missing mapping")
+	}
+}
+
+func TestEnsureUpstreamStockReturnsNilWhenCachedStockSufficient(t *testing.T) {
+	// 缓存库存=100，下单需要 1 → 直接放行，不应触发上游调用
+	var callCount int
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}
+	svc, db, _, cleanup := setupMappingWithUpstreamHandler(t,
+		"file:preorder_cache_sufficient?mode=memory&cache=shared",
+		handler,
+	)
+	defer cleanup()
+
+	var sku models.ProductSKU
+	if err := db.First(&sku).Error; err != nil {
+		t.Fatalf("load sku failed: %v", err)
+	}
+
+	if err := svc.EnsureUpstreamStockForOrder(sku.ID, 1); err != nil {
+		t.Fatalf("expected nil for sufficient cached stock, got %v", err)
+	}
+	if callCount != 0 {
+		t.Fatalf("expected zero upstream calls when cache is sufficient, got %d", callCount)
+	}
+}
+
+func TestEnsureUpstreamStockReturnsNilWhenNoMapping(t *testing.T) {
+	// 非上游商品（没有 sku_mapping）→ 放行
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}
+	svc, _, _, cleanup := setupMappingWithUpstreamHandler(t,
+		"file:preorder_no_mapping?mode=memory&cache=shared",
+		handler,
+	)
+	defer cleanup()
+
+	if err := svc.EnsureUpstreamStockForOrder(99999, 1); err != nil {
+		t.Fatalf("expected nil for non-upstream sku, got %v", err)
+	}
+}
+
+func TestEnsureUpstreamStockRejectsWhenUpstreamReportsZero(t *testing.T) {
+	// 缓存=0，实时同步上游返回 stock=0 → 拒绝
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// SyncProduct 走 GetProduct (/api/v1/upstream/products/:id)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"product": upstream.UpstreamProduct{
+				ID:              101,
+				Title:           models.JSON{"zh-CN": "测试"},
+				PriceAmount:     "10.00",
+				Currency:        "CNY",
+				FulfillmentType: constants.FulfillmentTypeAuto,
+				IsActive:        true,
+				SKUs: []upstream.UpstreamSKU{
+					{ID: 201, SKUCode: "SKU-A", PriceAmount: "10.00", IsActive: true, StockQuantity: 0},
+				},
+			},
+		})
+	}
+	svc, db, _, cleanup := setupMappingWithUpstreamHandler(t,
+		"file:preorder_rejects_zero?mode=memory&cache=shared",
+		handler,
+	)
+	defer cleanup()
+
+	// 强制把缓存 stock 降到不足
+	if err := db.Model(&models.SKUMapping{}).Where("upstream_sku_id = ?", 201).
+		Update("upstream_stock", 0).Error; err != nil {
+		t.Fatalf("reset stock failed: %v", err)
+	}
+
+	var sku models.ProductSKU
+	if err := db.First(&sku).Error; err != nil {
+		t.Fatalf("load sku failed: %v", err)
+	}
+
+	err := svc.EnsureUpstreamStockForOrder(sku.ID, 1)
+	if !errors.Is(err, ErrUpstreamStockInsufficient) {
+		t.Fatalf("expected ErrUpstreamStockInsufficient, got %v", err)
+	}
+}
+
+func TestEnsureUpstreamStockFailsOpenWhenUpstreamDown(t *testing.T) {
+	// 缓存=0，上游 500 → fail-open，下单放行
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream down", http.StatusInternalServerError)
+	}
+	svc, db, _, cleanup := setupMappingWithUpstreamHandler(t,
+		"file:preorder_fail_open?mode=memory&cache=shared",
+		handler,
+	)
+	defer cleanup()
+
+	if err := db.Model(&models.SKUMapping{}).Where("upstream_sku_id = ?", 201).
+		Update("upstream_stock", 0).Error; err != nil {
+		t.Fatalf("reset stock failed: %v", err)
+	}
+
+	var sku models.ProductSKU
+	if err := db.First(&sku).Error; err != nil {
+		t.Fatalf("load sku failed: %v", err)
+	}
+
+	if err := svc.EnsureUpstreamStockForOrder(sku.ID, 1); err != nil {
+		t.Fatalf("expected nil (fail-open) when upstream is down, got %v", err)
+	}
+}
+
 func TestSyncProductRestoresStatusWhenUpstreamRecovers(t *testing.T) {
 	// 之前已被标 inactive，上游 GetProduct 返回 IsActive=true → UpstreamStatus 应恢复为 active
 	svc, db, mapping, cleanup := setupMappingWithUpstreamHandler(t,

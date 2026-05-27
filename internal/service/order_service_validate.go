@@ -145,6 +145,11 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 			manualSKUAvailable(sku) < item.Quantity {
 			return nil, ErrManualStockInsufficient
 		}
+		if fulfillmentType == constants.FulfillmentTypeUpstream && s.productMappingService != nil {
+			if err := s.productMappingService.EnsureUpstreamStockForOrder(sku.ID, item.Quantity); err != nil {
+				return nil, err
+			}
+		}
 
 		manualSchemaSnapshot := models.JSON{}
 		manualSubmission := models.JSON{}

@@ -33,6 +33,7 @@ type ProductMappingService struct {
 	connService     *SiteConnectionService
 	categoryService *CategoryService
 	mediaService    *MediaService
+	settingService  *SettingService
 }
 
 // NewProductMappingService 创建商品映射服务
@@ -62,6 +63,11 @@ func (s *ProductMappingService) SetCategoryService(cs *CategoryService) {
 // SetMediaService 设置素材服务（避免循环依赖）
 func (s *ProductMappingService) SetMediaService(ms *MediaService) {
 	s.mediaService = ms
+}
+
+// SetSettingService 注入设置服务（用于读取上游同步动态配置）
+func (s *ProductMappingService) SetSettingService(ss *SettingService) {
+	s.settingService = ss
 }
 
 // GetByID 获取映射详情

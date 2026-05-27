@@ -433,6 +433,10 @@ const (
 
 	SettingKeyOrderRiskControlConfig = "order_risk_control_config"
 
+	SettingKeyUpstreamSyncConfig        = "upstream_sync_config"
+	SettingFieldUpstreamSyncIntervalMin = "interval_minutes"
+	SettingFieldUpstreamPreOrderCheck   = "pre_order_stock_check_enabled"
+
 	SettingKeyCallbackRoutesConfig = "callback_routes_config"
 
 	SettingKeyHomeAnnouncement   = "home_announcement"

@@ -72,6 +72,7 @@ var (
 	ErrProductPurchaseLimitInvalid         = errors.New("product purchase limit invalid")
 	ErrManualStockInvalid                  = errors.New("manual stock invalid")
 	ErrManualStockInsufficient             = errors.New("manual stock insufficient")
+	ErrUpstreamStockInsufficient           = errors.New("upstream stock insufficient")
 	ErrManualFormSchemaInvalid             = errors.New("manual form schema invalid")
 	ErrManualFormRequiredMissing           = errors.New("manual form required missing")
 	ErrManualFormFieldInvalid              = errors.New("manual form field invalid")
