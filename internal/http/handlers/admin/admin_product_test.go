@@ -55,6 +55,7 @@ func setupAdminProductHandlerTest(t *testing.T) (*Handler, *gorm.DB) {
 		repository.NewCartRepository(db),
 		repository.NewProductMappingRepository(db),
 		repository.NewOrderRepository(db),
+		repository.NewPaymentChannelRepository(db),
 	)
 
 	h := &Handler{Container: &provider.Container{

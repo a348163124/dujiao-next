@@ -273,7 +273,7 @@ func newAutoStockProductService(t *testing.T) (*ProductService, *gorm.DB) {
 		t.Fatalf("auto migrate card secret failed: %v", err)
 	}
 	secretRepo := repository.NewCardSecretRepository(db)
-	return NewProductService(nil, nil, secretRepo, nil, nil, nil, nil, nil, nil), db
+	return NewProductService(nil, nil, secretRepo, nil, nil, nil, nil, nil, nil, nil), db
 }
 
 func insertCardSecrets(t *testing.T, db *gorm.DB, productID, skuID uint, status string, count int) {
@@ -650,6 +650,91 @@ func TestProductServiceUpdateKeepsMappedProductFulfillmentUpstream(t *testing.T)
 	}
 }
 
+func TestProductServiceCreateFiltersUnavailablePaymentChannels(t *testing.T) {
+	svc, db := newProductServiceForTest(t)
+
+	category := models.Category{
+		Slug:     "payment-channel-category",
+		NameJSON: models.JSON{"zh-CN": "payment-channel-category"},
+	}
+	if err := db.Create(&category).Error; err != nil {
+		t.Fatalf("create category failed: %v", err)
+	}
+
+	activeChannel := createProductTestPaymentChannel(t, db, "Active", true, false)
+	inactiveChannel := createProductTestPaymentChannel(t, db, "Inactive", false, false)
+	deletedChannel := createProductTestPaymentChannel(t, db, "Deleted", true, true)
+
+	product, err := svc.Create(CreateProductInput{
+		CategoryID:        category.ID,
+		Slug:              "payment-channel-create",
+		TitleJSON:         map[string]interface{}{"zh-CN": "payment-channel-create"},
+		PriceAmount:       decimal.NewFromInt(10),
+		PurchaseType:      constants.ProductPurchaseMember,
+		FulfillmentType:   constants.FulfillmentTypeAuto,
+		PaymentChannelIDs: []uint{deletedChannel.ID, inactiveChannel.ID, activeChannel.ID},
+		IsActive: func() *bool {
+			value := true
+			return &value
+		}(),
+	})
+	if err != nil {
+		t.Fatalf("create product failed: %v", err)
+	}
+
+	got := DecodeChannelIDs(product.PaymentChannelIDs)
+	if len(got) != 1 || got[0] != activeChannel.ID {
+		t.Fatalf("expected only active payment channel %d, got %v", activeChannel.ID, got)
+	}
+}
+
+func TestProductServiceUpdateFiltersUnavailablePaymentChannels(t *testing.T) {
+	svc, db := newProductServiceForTest(t)
+
+	category := models.Category{
+		Slug:     "payment-channel-update-category",
+		NameJSON: models.JSON{"zh-CN": "payment-channel-update-category"},
+	}
+	if err := db.Create(&category).Error; err != nil {
+		t.Fatalf("create category failed: %v", err)
+	}
+
+	deletedChannel := createProductTestPaymentChannel(t, db, "Deleted", true, true)
+	product := models.Product{
+		CategoryID:        category.ID,
+		Slug:              "payment-channel-update",
+		TitleJSON:         models.JSON{"zh-CN": "payment-channel-update"},
+		PriceAmount:       models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
+		PurchaseType:      constants.ProductPurchaseMember,
+		FulfillmentType:   constants.FulfillmentTypeAuto,
+		PaymentChannelIDs: EncodeChannelIDs([]uint{deletedChannel.ID}),
+		IsActive:          true,
+	}
+	if err := db.Create(&product).Error; err != nil {
+		t.Fatalf("create product failed: %v", err)
+	}
+
+	updated, err := svc.Update(strconv.FormatUint(uint64(product.ID), 10), CreateProductInput{
+		CategoryID:        category.ID,
+		Slug:              product.Slug,
+		TitleJSON:         map[string]interface{}{"zh-CN": "payment-channel-update"},
+		PriceAmount:       decimal.NewFromInt(10),
+		PurchaseType:      constants.ProductPurchaseMember,
+		FulfillmentType:   constants.FulfillmentTypeAuto,
+		PaymentChannelIDs: []uint{deletedChannel.ID},
+		IsActive: func() *bool {
+			value := true
+			return &value
+		}(),
+	})
+	if err != nil {
+		t.Fatalf("update product failed: %v", err)
+	}
+	if got := DecodeChannelIDs(updated.PaymentChannelIDs); len(got) != 0 {
+		t.Fatalf("expected stale-only payment channels to be cleared, got %v", got)
+	}
+}
+
 func TestProductServiceUpdateRejectsDisablingAutoSKUWithCardSecretStock(t *testing.T) {
 	svc, db := newProductServiceForTest(t)
 
@@ -748,7 +833,7 @@ func newProductServiceForTest(t *testing.T) (*ProductService, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open sqlite failed: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Category{}, &models.Product{}, &models.ProductSKU{}, &models.CardSecret{}, &models.CardSecretBatch{}, &models.MemberLevelPrice{}, &models.CartItem{}, &models.ProductMapping{}, &models.SKUMapping{}, &models.Order{}, &models.OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&models.Category{}, &models.Product{}, &models.ProductSKU{}, &models.CardSecret{}, &models.CardSecretBatch{}, &models.MemberLevelPrice{}, &models.CartItem{}, &models.ProductMapping{}, &models.SKUMapping{}, &models.Order{}, &models.OrderItem{}, &models.PaymentChannel{}); err != nil {
 		t.Fatalf("auto migrate product service tables failed: %v", err)
 	}
 
@@ -762,7 +847,35 @@ func newProductServiceForTest(t *testing.T) (*ProductService, *gorm.DB) {
 		repository.NewCartRepository(db),
 		repository.NewProductMappingRepository(db),
 		repository.NewOrderRepository(db),
+		repository.NewPaymentChannelRepository(db),
 	), db
+}
+
+func createProductTestPaymentChannel(t *testing.T, db *gorm.DB, name string, active bool, deleted bool) models.PaymentChannel {
+	t.Helper()
+
+	channel := models.PaymentChannel{
+		Name:            name,
+		ProviderType:    "official",
+		ChannelType:     "wechat",
+		InteractionMode: "qr",
+		IsActive:        active,
+	}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatalf("create payment channel failed: %v", err)
+	}
+	if !active {
+		if err := db.Model(&channel).Update("is_active", false).Error; err != nil {
+			t.Fatalf("disable payment channel failed: %v", err)
+		}
+		channel.IsActive = false
+	}
+	if deleted {
+		if err := db.Delete(&channel).Error; err != nil {
+			t.Fatalf("delete payment channel failed: %v", err)
+		}
+	}
+	return channel
 }
 
 func TestProductServiceDeleteCascade(t *testing.T) {

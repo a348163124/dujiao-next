@@ -24,6 +24,7 @@ type ProductService struct {
 	cartRepo             repository.CartRepository
 	productMappingRepo   repository.ProductMappingRepository
 	orderRepo            repository.OrderRepository
+	paymentChannelRepo   repository.PaymentChannelRepository
 }
 
 // NewProductService 创建商品服务
@@ -37,6 +38,7 @@ func NewProductService(
 	cartRepo repository.CartRepository,
 	productMappingRepo repository.ProductMappingRepository,
 	orderRepo repository.OrderRepository,
+	paymentChannelRepo repository.PaymentChannelRepository,
 ) *ProductService {
 	return &ProductService{
 		repo:                 repo,
@@ -48,7 +50,55 @@ func NewProductService(
 		cartRepo:             cartRepo,
 		productMappingRepo:   productMappingRepo,
 		orderRepo:            orderRepo,
+		paymentChannelRepo:   paymentChannelRepo,
 	}
+}
+
+func (s *ProductService) filterAvailablePaymentChannelIDs(ids []uint) ([]uint, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	uniqueIDs := make([]uint, 0, len(ids))
+	seen := make(map[uint]struct{}, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	if len(uniqueIDs) == 0 {
+		return nil, nil
+	}
+	if s.paymentChannelRepo == nil {
+		return uniqueIDs, nil
+	}
+
+	channels, err := s.paymentChannelRepo.ListByIDs(uniqueIDs)
+	if err != nil {
+		return nil, err
+	}
+	activeIDs := make(map[uint]struct{}, len(channels))
+	for _, channel := range channels {
+		if channel.IsActive {
+			activeIDs[channel.ID] = struct{}{}
+		}
+	}
+
+	filtered := make([]uint, 0, len(uniqueIDs))
+	for _, id := range uniqueIDs {
+		if _, ok := activeIDs[id]; ok {
+			filtered = append(filtered, id)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, nil
+	}
+	return filtered, nil
 }
 
 // CreateProductInput 创建/更新商品输入
@@ -241,6 +291,10 @@ func (s *ProductService) Create(input CreateProductInput) (*models.Product, erro
 		}
 		costPriceAmount = minActiveCostPrice(normalizedSKUs)
 	}
+	paymentChannelIDs, err := s.filterAvailablePaymentChannelIDs(input.PaymentChannelIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	product := models.Product{
 		CategoryID:           input.CategoryID,
@@ -262,7 +316,7 @@ func (s *ProductService) Create(input CreateProductInput) (*models.Product, erro
 		ManualStockTotal:     manualStockTotal,
 		ManualStockLocked:    0,
 		ManualStockSold:      0,
-		PaymentChannelIDs:    EncodeChannelIDs(input.PaymentChannelIDs),
+		PaymentChannelIDs:    EncodeChannelIDs(paymentChannelIDs),
 		IsAffiliateEnabled:   isAffiliateEnabled,
 		IsActive:             isActive,
 		SortOrder:            input.SortOrder,
@@ -336,7 +390,11 @@ func (s *ProductService) Update(id string, input CreateProductInput) (*models.Pr
 	product.SortOrder = input.SortOrder
 	product.Images = models.StringArray(input.Images)
 	product.Tags = models.StringArray(input.Tags)
-	product.PaymentChannelIDs = EncodeChannelIDs(input.PaymentChannelIDs)
+	paymentChannelIDs, err := s.filterAvailablePaymentChannelIDs(input.PaymentChannelIDs)
+	if err != nil {
+		return nil, err
+	}
+	product.PaymentChannelIDs = EncodeChannelIDs(paymentChannelIDs)
 	if input.IsActive != nil {
 		product.IsActive = *input.IsActive
 	}
