@@ -118,6 +118,46 @@ func newTestProcurementService(
 	return svc
 }
 
+type procurementCallbackStatusFixture struct {
+	orderNo                   string
+	initialOrderStatus        string
+	initialProcurementStatus  string
+	callbackStatus            string
+	expectedProcurementStatus string
+	expectedOrderStatus       string
+}
+
+func assertProcurementCallbackStatus(t *testing.T, fixture procurementCallbackStatusFixture) {
+	t.Helper()
+	db := setupProcurementTestDB(t)
+
+	order := createProcTestOrder(t, db, fixture.orderNo, fixture.initialOrderStatus, constants.FulfillmentTypeUpstream)
+	proc := createTestProcurementOrder(t, db, 1, order.ID, order.OrderNo, fixture.initialProcurementStatus)
+
+	connSvc := NewSiteConnectionService(repository.NewSiteConnectionRepository(db), "test-key", t.TempDir())
+	svc := newTestProcurementService(db, connSvc)
+
+	if err := svc.HandleUpstreamCallback(proc.ID, fixture.callbackStatus, nil); err != nil {
+		t.Fatalf("HandleUpstreamCallback: %v", err)
+	}
+
+	var updatedProc models.ProcurementOrder
+	if err := db.First(&updatedProc, proc.ID).Error; err != nil {
+		t.Fatalf("load procurement: %v", err)
+	}
+	if updatedProc.Status != fixture.expectedProcurementStatus {
+		t.Errorf("expected procurement status %q, got %q", fixture.expectedProcurementStatus, updatedProc.Status)
+	}
+
+	var updatedOrder models.Order
+	if err := db.First(&updatedOrder, order.ID).Error; err != nil {
+		t.Fatalf("load order: %v", err)
+	}
+	if updatedOrder.Status != fixture.expectedOrderStatus {
+		t.Errorf("expected order status %q, got %q", fixture.expectedOrderStatus, updatedOrder.Status)
+	}
+}
+
 // ── Phase 1 tests: order rollback on procurement failure ──
 
 func TestRejectProcurement_RollsBackOrderStatus(t *testing.T) {
@@ -235,93 +275,36 @@ func TestHandleUpstreamCallback_Delivered_CreatesFulfillment(t *testing.T) {
 }
 
 func TestHandleUpstreamCallback_PartiallyRefunded_AfterFulfilledUpdatesProcurementStatus(t *testing.T) {
-	db := setupProcurementTestDB(t)
-
-	order := createProcTestOrder(t, db, "PROC-REFUND-KEEP-001", constants.OrderStatusDelivered, constants.FulfillmentTypeUpstream)
-	proc := createTestProcurementOrder(t, db, 1, order.ID, order.OrderNo, constants.ProcurementStatusFulfilled)
-
-	connSvc := NewSiteConnectionService(repository.NewSiteConnectionRepository(db), "test-key", t.TempDir())
-	svc := newTestProcurementService(db, connSvc)
-
-	if err := svc.HandleUpstreamCallback(proc.ID, "partially_refunded", nil); err != nil {
-		t.Fatalf("HandleUpstreamCallback: %v", err)
-	}
-
-	var updatedProc models.ProcurementOrder
-	if err := db.First(&updatedProc, proc.ID).Error; err != nil {
-		t.Fatalf("load procurement: %v", err)
-	}
-	if updatedProc.Status != constants.ProcurementStatusPartiallyRefunded {
-		t.Errorf("expected procurement status %q, got %q", constants.ProcurementStatusPartiallyRefunded, updatedProc.Status)
-	}
-
-	var updatedOrder models.Order
-	if err := db.First(&updatedOrder, order.ID).Error; err != nil {
-		t.Fatalf("load order: %v", err)
-	}
-	if updatedOrder.Status != constants.OrderStatusDelivered {
-		t.Errorf("expected order status %q, got %q", constants.OrderStatusDelivered, updatedOrder.Status)
-	}
+	assertProcurementCallbackStatus(t, procurementCallbackStatusFixture{
+		orderNo:                   "PROC-REFUND-KEEP-001",
+		initialOrderStatus:        constants.OrderStatusDelivered,
+		initialProcurementStatus:  constants.ProcurementStatusFulfilled,
+		callbackStatus:            "partially_refunded",
+		expectedProcurementStatus: constants.ProcurementStatusPartiallyRefunded,
+		expectedOrderStatus:       constants.OrderStatusDelivered,
+	})
 }
 
 func TestHandleUpstreamCallback_PartiallyRefunded_WhileFulfillingKeepsOrderStatus(t *testing.T) {
-	db := setupProcurementTestDB(t)
-
-	order := createProcTestOrder(t, db, "PROC-REFUND-FULFILLING-001", constants.OrderStatusFulfilling, constants.FulfillmentTypeUpstream)
-	proc := createTestProcurementOrder(t, db, 1, order.ID, order.OrderNo, constants.ProcurementStatusAccepted)
-
-	connSvc := NewSiteConnectionService(repository.NewSiteConnectionRepository(db), "test-key", t.TempDir())
-	svc := newTestProcurementService(db, connSvc)
-
-	if err := svc.HandleUpstreamCallback(proc.ID, "partially_refunded", nil); err != nil {
-		t.Fatalf("HandleUpstreamCallback: %v", err)
-	}
-
-	var updatedProc models.ProcurementOrder
-	if err := db.First(&updatedProc, proc.ID).Error; err != nil {
-		t.Fatalf("load procurement: %v", err)
-	}
-	if updatedProc.Status != constants.ProcurementStatusPartiallyRefunded {
-		t.Errorf("expected procurement status %q, got %q", constants.ProcurementStatusPartiallyRefunded, updatedProc.Status)
-	}
-
-	var updatedOrder models.Order
-	if err := db.First(&updatedOrder, order.ID).Error; err != nil {
-		t.Fatalf("load order: %v", err)
-	}
-	if updatedOrder.Status != constants.OrderStatusFulfilling {
-		t.Errorf("expected order status %q, got %q", constants.OrderStatusFulfilling, updatedOrder.Status)
-	}
+	assertProcurementCallbackStatus(t, procurementCallbackStatusFixture{
+		orderNo:                   "PROC-REFUND-FULFILLING-001",
+		initialOrderStatus:        constants.OrderStatusFulfilling,
+		initialProcurementStatus:  constants.ProcurementStatusAccepted,
+		callbackStatus:            "partially_refunded",
+		expectedProcurementStatus: constants.ProcurementStatusPartiallyRefunded,
+		expectedOrderStatus:       constants.OrderStatusFulfilling,
+	})
 }
 
 func TestHandleUpstreamCallback_Refunded_AfterCompletedKeepsOrderStatus(t *testing.T) {
-	db := setupProcurementTestDB(t)
-
-	order := createProcTestOrder(t, db, "PROC-REFUND-COMPLETED-001", constants.OrderStatusCompleted, constants.FulfillmentTypeUpstream)
-	proc := createTestProcurementOrder(t, db, 1, order.ID, order.OrderNo, constants.ProcurementStatusFulfilled)
-
-	connSvc := NewSiteConnectionService(repository.NewSiteConnectionRepository(db), "test-key", t.TempDir())
-	svc := newTestProcurementService(db, connSvc)
-
-	if err := svc.HandleUpstreamCallback(proc.ID, "refunded", nil); err != nil {
-		t.Fatalf("HandleUpstreamCallback: %v", err)
-	}
-
-	var updatedProc models.ProcurementOrder
-	if err := db.First(&updatedProc, proc.ID).Error; err != nil {
-		t.Fatalf("load procurement: %v", err)
-	}
-	if updatedProc.Status != constants.ProcurementStatusRefunded {
-		t.Errorf("expected procurement status %q, got %q", constants.ProcurementStatusRefunded, updatedProc.Status)
-	}
-
-	var updatedOrder models.Order
-	if err := db.First(&updatedOrder, order.ID).Error; err != nil {
-		t.Fatalf("load order: %v", err)
-	}
-	if updatedOrder.Status != constants.OrderStatusCompleted {
-		t.Errorf("expected order status %q, got %q", constants.OrderStatusCompleted, updatedOrder.Status)
-	}
+	assertProcurementCallbackStatus(t, procurementCallbackStatusFixture{
+		orderNo:                   "PROC-REFUND-COMPLETED-001",
+		initialOrderStatus:        constants.OrderStatusCompleted,
+		initialProcurementStatus:  constants.ProcurementStatusFulfilled,
+		callbackStatus:            "refunded",
+		expectedProcurementStatus: constants.ProcurementStatusRefunded,
+		expectedOrderStatus:       constants.OrderStatusCompleted,
+	})
 }
 
 func TestProcurement_GetByID_DoesNotIncludeLocalRefundRecords(t *testing.T) {

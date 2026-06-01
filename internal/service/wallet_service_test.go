@@ -171,6 +171,64 @@ func createTestChildOrderWithFulfillmentType(
 	return child
 }
 
+type walletMixedChildrenRefundFixture struct {
+	userID               uint
+	parentOrderNo        string
+	refundAmount         decimal.Decimal
+	remark               string
+	expectedParentStatus string
+	expectedChildStatus  string
+}
+
+func assertWalletMixedChildrenRefundStatus(t *testing.T, fixture walletMixedChildrenRefundFixture) {
+	t.Helper()
+	svc, db := setupWalletServiceTest(t)
+	createTestUser(t, db, fixture.userID)
+	parent := createTestOrder(t, db, fixture.userID, fixture.parentOrderNo, decimal.NewFromInt(100))
+	paidAt := time.Now()
+	if err := db.Model(&models.Order{}).Where("id = ?", parent.ID).Updates(map[string]interface{}{
+		"status":  constants.OrderStatusCompleted,
+		"paid_at": paidAt,
+	}).Error; err != nil {
+		t.Fatalf("update parent status failed: %v", err)
+	}
+	parent.PaidAt = &paidAt
+
+	manualChild := createTestChildOrderWithFulfillmentType(
+		t, db, parent, fixture.parentOrderNo+"-1", constants.OrderStatusPaid,
+		decimal.NewFromInt(60), constants.FulfillmentTypeManual, false,
+	)
+	autoChild := createTestChildOrderWithFulfillmentType(
+		t, db, parent, fixture.parentOrderNo+"-2", constants.OrderStatusCompleted,
+		decimal.NewFromInt(40), constants.FulfillmentTypeAuto, true,
+	)
+
+	updatedOrder, _, _, err := svc.AdminRefundToWallet(AdminRefundToWalletInput{
+		OrderID: parent.ID,
+		Amount:  models.NewMoneyFromDecimal(fixture.refundAmount),
+		Remark:  fixture.remark,
+	})
+	if err != nil {
+		t.Fatalf("admin refund failed: %v", err)
+	}
+	if updatedOrder.Status != fixture.expectedParentStatus {
+		t.Fatalf("expected parent status %s, got: %s", fixture.expectedParentStatus, updatedOrder.Status)
+	}
+	assertWalletOrderStatus(t, db, manualChild.ID, "manual child", fixture.expectedChildStatus)
+	assertWalletOrderStatus(t, db, autoChild.ID, "auto child", fixture.expectedChildStatus)
+}
+
+func assertWalletOrderStatus(t *testing.T, db *gorm.DB, orderID uint, label, expected string) {
+	t.Helper()
+	var refreshed models.Order
+	if err := db.First(&refreshed, orderID).Error; err != nil {
+		t.Fatalf("reload %s failed: %v", label, err)
+	}
+	if refreshed.Status != expected {
+		t.Fatalf("expected %s %s, got: %s", label, expected, refreshed.Status)
+	}
+}
+
 func TestWalletServiceRecharge(t *testing.T) {
 	svc, db := setupWalletServiceTest(t)
 	createTestUser(t, db, 101)
@@ -538,103 +596,23 @@ func TestWalletServiceAdminRefundToWalletFullRefundUpdatesChildrenStatus(t *test
 }
 
 func TestWalletServiceAdminRefundToWalletParentPartialMixedChildrenStatus(t *testing.T) {
-	svc, db := setupWalletServiceTest(t)
-	createTestUser(t, db, 207)
-	parent := createTestOrder(t, db, 207, "DJTESTREFUNDMIXED-PARTIAL", decimal.NewFromInt(100))
-	paidAt := time.Now()
-	if err := db.Model(&models.Order{}).Where("id = ?", parent.ID).Updates(map[string]interface{}{
-		"status":  constants.OrderStatusCompleted,
-		"paid_at": paidAt,
-	}).Error; err != nil {
-		t.Fatalf("update parent status failed: %v", err)
-	}
-	parent.PaidAt = &paidAt
-
-	manualChild := createTestChildOrderWithFulfillmentType(
-		t, db, parent, "DJTESTREFUNDMIXED-PARTIAL-1", constants.OrderStatusPaid,
-		decimal.NewFromInt(60), constants.FulfillmentTypeManual, false,
-	)
-	autoChild := createTestChildOrderWithFulfillmentType(
-		t, db, parent, "DJTESTREFUNDMIXED-PARTIAL-2", constants.OrderStatusCompleted,
-		decimal.NewFromInt(40), constants.FulfillmentTypeAuto, true,
-	)
-
-	updatedOrder, _, _, err := svc.AdminRefundToWallet(AdminRefundToWalletInput{
-		OrderID: parent.ID,
-		Amount:  models.NewMoneyFromDecimal(decimal.NewFromInt(20)),
-		Remark:  "混合子订单部分退款",
+	assertWalletMixedChildrenRefundStatus(t, walletMixedChildrenRefundFixture{
+		userID:               207,
+		parentOrderNo:        "DJTESTREFUNDMIXED-PARTIAL",
+		refundAmount:         decimal.NewFromInt(20),
+		remark:               "混合子订单部分退款",
+		expectedParentStatus: constants.OrderStatusPartiallyRefunded,
+		expectedChildStatus:  constants.OrderStatusPartiallyRefunded,
 	})
-	if err != nil {
-		t.Fatalf("admin refund failed: %v", err)
-	}
-	if updatedOrder.Status != constants.OrderStatusPartiallyRefunded {
-		t.Fatalf("expected parent status partially_refunded, got: %s", updatedOrder.Status)
-	}
-
-	var refreshedManual models.Order
-	if err := db.First(&refreshedManual, manualChild.ID).Error; err != nil {
-		t.Fatalf("reload manual child failed: %v", err)
-	}
-	if refreshedManual.Status != constants.OrderStatusPartiallyRefunded {
-		t.Fatalf("expected manual child partially_refunded, got: %s", refreshedManual.Status)
-	}
-
-	var refreshedAuto models.Order
-	if err := db.First(&refreshedAuto, autoChild.ID).Error; err != nil {
-		t.Fatalf("reload auto child failed: %v", err)
-	}
-	if refreshedAuto.Status != constants.OrderStatusPartiallyRefunded {
-		t.Fatalf("expected auto child partially_refunded, got: %s", refreshedAuto.Status)
-	}
 }
 
 func TestWalletServiceAdminRefundToWalletParentFullMixedChildrenStatus(t *testing.T) {
-	svc, db := setupWalletServiceTest(t)
-	createTestUser(t, db, 208)
-	parent := createTestOrder(t, db, 208, "DJTESTREFUNDMIXED-FULL", decimal.NewFromInt(100))
-	paidAt := time.Now()
-	if err := db.Model(&models.Order{}).Where("id = ?", parent.ID).Updates(map[string]interface{}{
-		"status":  constants.OrderStatusCompleted,
-		"paid_at": paidAt,
-	}).Error; err != nil {
-		t.Fatalf("update parent status failed: %v", err)
-	}
-	parent.PaidAt = &paidAt
-
-	manualChild := createTestChildOrderWithFulfillmentType(
-		t, db, parent, "DJTESTREFUNDMIXED-FULL-1", constants.OrderStatusPaid,
-		decimal.NewFromInt(60), constants.FulfillmentTypeManual, false,
-	)
-	autoChild := createTestChildOrderWithFulfillmentType(
-		t, db, parent, "DJTESTREFUNDMIXED-FULL-2", constants.OrderStatusCompleted,
-		decimal.NewFromInt(40), constants.FulfillmentTypeAuto, true,
-	)
-
-	updatedOrder, _, _, err := svc.AdminRefundToWallet(AdminRefundToWalletInput{
-		OrderID: parent.ID,
-		Amount:  models.NewMoneyFromDecimal(decimal.NewFromInt(100)),
-		Remark:  "混合子订单全额退款",
+	assertWalletMixedChildrenRefundStatus(t, walletMixedChildrenRefundFixture{
+		userID:               208,
+		parentOrderNo:        "DJTESTREFUNDMIXED-FULL",
+		refundAmount:         decimal.NewFromInt(100),
+		remark:               "混合子订单全额退款",
+		expectedParentStatus: constants.OrderStatusRefunded,
+		expectedChildStatus:  constants.OrderStatusRefunded,
 	})
-	if err != nil {
-		t.Fatalf("admin refund failed: %v", err)
-	}
-	if updatedOrder.Status != constants.OrderStatusRefunded {
-		t.Fatalf("expected parent status refunded, got: %s", updatedOrder.Status)
-	}
-
-	var refreshedManual models.Order
-	if err := db.First(&refreshedManual, manualChild.ID).Error; err != nil {
-		t.Fatalf("reload manual child failed: %v", err)
-	}
-	if refreshedManual.Status != constants.OrderStatusRefunded {
-		t.Fatalf("expected manual child refunded, got: %s", refreshedManual.Status)
-	}
-
-	var refreshedAuto models.Order
-	if err := db.First(&refreshedAuto, autoChild.ID).Error; err != nil {
-		t.Fatalf("reload auto child failed: %v", err)
-	}
-	if refreshedAuto.Status != constants.OrderStatusRefunded {
-		t.Fatalf("expected auto child refunded, got: %s", refreshedAuto.Status)
-	}
 }

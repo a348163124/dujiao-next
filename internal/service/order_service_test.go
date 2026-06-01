@@ -96,6 +96,92 @@ func TestResolveManualFormSubmissionFallbackLegacyProductKey(t *testing.T) {
 	}
 }
 
+type orderPurchaseQuantityLimitFixture struct {
+	dsnPrefix       string
+	categorySlug    string
+	productSlug     string
+	minQuantity     int
+	maxQuantity     int
+	requestQuantity int
+	expectedErr     error
+}
+
+func assertBuildOrderResultRejectsPurchaseQuantity(t *testing.T, fixture orderPurchaseQuantityLimitFixture) {
+	t.Helper()
+	dsn := fmt.Sprintf("file:%s_%d?mode=memory&cache=shared", fixture.dsnPrefix, time.Now().UnixNano())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite failed: %v", err)
+	}
+	if err := db.AutoMigrate(&models.Category{}, &models.Product{}, &models.ProductSKU{}, &models.Promotion{}); err != nil {
+		t.Fatalf("auto migrate failed: %v", err)
+	}
+
+	now := time.Now()
+	category := models.Category{
+		Slug:      fixture.categorySlug,
+		NameJSON:  models.JSON{"zh-CN": "测试分类"},
+		SortOrder: 0,
+		CreatedAt: now,
+	}
+	if err := db.Create(&category).Error; err != nil {
+		t.Fatalf("create category failed: %v", err)
+	}
+
+	product := models.Product{
+		CategoryID:          category.ID,
+		Slug:                fixture.productSlug,
+		TitleJSON:           models.JSON{"zh-CN": "测试商品"},
+		PriceAmount:         models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
+		PurchaseType:        constants.ProductPurchaseMember,
+		FulfillmentType:     constants.FulfillmentTypeManual,
+		MinPurchaseQuantity: fixture.minQuantity,
+		MaxPurchaseQuantity: fixture.maxQuantity,
+		IsActive:            true,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	if err := db.Create(&product).Error; err != nil {
+		t.Fatalf("create product failed: %v", err)
+	}
+
+	sku := models.ProductSKU{
+		ProductID:         product.ID,
+		SKUCode:           models.DefaultSKUCode,
+		PriceAmount:       models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
+		IsActive:          true,
+		ManualStockTotal:  constants.ManualStockUnlimited,
+		ManualStockLocked: 0,
+		ManualStockSold:   0,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := db.Create(&sku).Error; err != nil {
+		t.Fatalf("create sku failed: %v", err)
+	}
+
+	svc := NewOrderService(OrderServiceOptions{
+		ProductRepo:    repository.NewProductRepository(db),
+		ProductSKURepo: repository.NewProductSKURepository(db),
+		PromotionRepo:  repository.NewPromotionRepository(db),
+		ExpireMinutes:  15,
+	})
+
+	_, err = svc.buildOrderResult(orderCreateParams{
+		UserID: 1,
+		Items: []CreateOrderItem{
+			{
+				ProductID: product.ID,
+				SKUID:     sku.ID,
+				Quantity:  fixture.requestQuantity,
+			},
+		},
+	})
+	if !errors.Is(err, fixture.expectedErr) {
+		t.Fatalf("expected %v, got: %v", fixture.expectedErr, err)
+	}
+}
+
 func TestCalcParentStatus(t *testing.T) {
 	children := []models.Order{
 		{Status: constants.OrderStatusDelivered},
@@ -1044,151 +1130,25 @@ func TestBuildOrderResultStacksPromotionAndMemberDiscount(t *testing.T) {
 }
 
 func TestBuildOrderResultRejectsProductMaxPurchaseQuantityExceeded(t *testing.T) {
-	dsn := fmt.Sprintf("file:order_service_purchase_limit_%d?mode=memory&cache=shared", time.Now().UnixNano())
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
-	if err := db.AutoMigrate(&models.Category{}, &models.Product{}, &models.ProductSKU{}, &models.Promotion{}); err != nil {
-		t.Fatalf("auto migrate failed: %v", err)
-	}
-
-	now := time.Now()
-	category := models.Category{
-		Slug:      "test-category-limit",
-		NameJSON:  models.JSON{"zh-CN": "测试分类"},
-		SortOrder: 0,
-		CreatedAt: now,
-	}
-	if err := db.Create(&category).Error; err != nil {
-		t.Fatalf("create category failed: %v", err)
-	}
-
-	product := models.Product{
-		CategoryID:          category.ID,
-		Slug:                "test-product-limit",
-		TitleJSON:           models.JSON{"zh-CN": "测试商品"},
-		PriceAmount:         models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
-		PurchaseType:        constants.ProductPurchaseMember,
-		FulfillmentType:     constants.FulfillmentTypeManual,
-		MaxPurchaseQuantity: 2,
-		IsActive:            true,
-		CreatedAt:           now,
-		UpdatedAt:           now,
-	}
-	if err := db.Create(&product).Error; err != nil {
-		t.Fatalf("create product failed: %v", err)
-	}
-
-	sku := models.ProductSKU{
-		ProductID:         product.ID,
-		SKUCode:           models.DefaultSKUCode,
-		PriceAmount:       models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
-		IsActive:          true,
-		ManualStockTotal:  constants.ManualStockUnlimited,
-		ManualStockLocked: 0,
-		ManualStockSold:   0,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	if err := db.Create(&sku).Error; err != nil {
-		t.Fatalf("create sku failed: %v", err)
-	}
-
-	svc := NewOrderService(OrderServiceOptions{
-		ProductRepo:    repository.NewProductRepository(db),
-		ProductSKURepo: repository.NewProductSKURepository(db),
-		PromotionRepo:  repository.NewPromotionRepository(db),
-		ExpireMinutes:  15,
+	assertBuildOrderResultRejectsPurchaseQuantity(t, orderPurchaseQuantityLimitFixture{
+		dsnPrefix:       "order_service_purchase_limit",
+		categorySlug:    "test-category-limit",
+		productSlug:     "test-product-limit",
+		maxQuantity:     2,
+		requestQuantity: 3,
+		expectedErr:     ErrProductMaxPurchaseExceeded,
 	})
-
-	_, err = svc.buildOrderResult(orderCreateParams{
-		UserID: 1,
-		Items: []CreateOrderItem{
-			{
-				ProductID: product.ID,
-				SKUID:     sku.ID,
-				Quantity:  3,
-			},
-		},
-	})
-	if !errors.Is(err, ErrProductMaxPurchaseExceeded) {
-		t.Fatalf("expected product max purchase exceeded, got: %v", err)
-	}
 }
 
 func TestBuildOrderResultRejectsProductMinPurchaseQuantityNotMet(t *testing.T) {
-	dsn := fmt.Sprintf("file:order_service_purchase_min_%d?mode=memory&cache=shared", time.Now().UnixNano())
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
-	if err := db.AutoMigrate(&models.Category{}, &models.Product{}, &models.ProductSKU{}, &models.Promotion{}); err != nil {
-		t.Fatalf("auto migrate failed: %v", err)
-	}
-
-	now := time.Now()
-	category := models.Category{
-		Slug:      "test-category-min-limit",
-		NameJSON:  models.JSON{"zh-CN": "测试分类"},
-		SortOrder: 0,
-		CreatedAt: now,
-	}
-	if err := db.Create(&category).Error; err != nil {
-		t.Fatalf("create category failed: %v", err)
-	}
-
-	product := models.Product{
-		CategoryID:          category.ID,
-		Slug:                "test-product-min-limit",
-		TitleJSON:           models.JSON{"zh-CN": "测试商品"},
-		PriceAmount:         models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
-		PurchaseType:        constants.ProductPurchaseMember,
-		FulfillmentType:     constants.FulfillmentTypeManual,
-		MinPurchaseQuantity: 3,
-		IsActive:            true,
-		CreatedAt:           now,
-		UpdatedAt:           now,
-	}
-	if err := db.Create(&product).Error; err != nil {
-		t.Fatalf("create product failed: %v", err)
-	}
-
-	sku := models.ProductSKU{
-		ProductID:         product.ID,
-		SKUCode:           models.DefaultSKUCode,
-		PriceAmount:       models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
-		IsActive:          true,
-		ManualStockTotal:  constants.ManualStockUnlimited,
-		ManualStockLocked: 0,
-		ManualStockSold:   0,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	if err := db.Create(&sku).Error; err != nil {
-		t.Fatalf("create sku failed: %v", err)
-	}
-
-	svc := NewOrderService(OrderServiceOptions{
-		ProductRepo:    repository.NewProductRepository(db),
-		ProductSKURepo: repository.NewProductSKURepository(db),
-		PromotionRepo:  repository.NewPromotionRepository(db),
-		ExpireMinutes:  15,
+	assertBuildOrderResultRejectsPurchaseQuantity(t, orderPurchaseQuantityLimitFixture{
+		dsnPrefix:       "order_service_purchase_min",
+		categorySlug:    "test-category-min-limit",
+		productSlug:     "test-product-min-limit",
+		minQuantity:     3,
+		requestQuantity: 2,
+		expectedErr:     ErrProductMinPurchaseNotMet,
 	})
-
-	_, err = svc.buildOrderResult(orderCreateParams{
-		UserID: 1,
-		Items: []CreateOrderItem{
-			{
-				ProductID: product.ID,
-				SKUID:     sku.ID,
-				Quantity:  2,
-			},
-		},
-	})
-	if !errors.Is(err, ErrProductMinPurchaseNotMet) {
-		t.Fatalf("expected product min purchase not met, got: %v", err)
-	}
 }
 
 func TestBuildOrderResultOriginalAmountBeforePromotion(t *testing.T) {
