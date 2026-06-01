@@ -150,46 +150,17 @@ type EnableResult struct {
 
 // Enable 校验首次 code，启用 2FA，生成恢复码
 func (s *TOTPService) Enable(adminID uint, code string) (*EnableResult, error) {
-	admin, err := s.adminRepo.GetByID(adminID)
+	prepared, err := enableTOTPFor(s, totpEnableInput{
+		accountID:         adminID,
+		encKey:            s.encKey,
+		code:              code,
+		recoveryCodeCount: totpRecoveryCodeCount,
+		now:               s.now,
+	})
 	if err != nil {
 		return nil, err
 	}
-	if admin == nil {
-		return nil, ErrNotFound
-	}
-	if admin.TOTPEnabledAt != nil {
-		return nil, ErrTOTPAlreadyEnabled
-	}
-	if admin.TOTPPendingSecret == "" || admin.TOTPPendingExpiresAt == nil || s.now().After(*admin.TOTPPendingExpiresAt) {
-		return nil, ErrTOTPPendingExpired
-	}
-	if err := s.checkEnableFailures(adminID); err != nil {
-		return nil, err
-	}
-	secret, err := crypto.Decrypt(s.encKey, admin.TOTPPendingSecret)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt pending: %w", err)
-	}
-	if !s.verifyCode(secret, code) {
-		s.bumpEnableFailures(adminID)
-		return nil, ErrTOTPCodeInvalid
-	}
-	encSecret, err := crypto.Encrypt(s.encKey, secret)
-	if err != nil {
-		return nil, fmt.Errorf("re-encrypt secret: %w", err)
-	}
-	plaintextCodes, codesJSON, err := s.generateRecoveryCodes(totpRecoveryCodeCount)
-	if err != nil {
-		return nil, err
-	}
-	enabledAt := s.now()
-	if err := s.adminRepo.UpdateTOTPEnabled(adminID, encSecret, enabledAt, codesJSON); err != nil {
-		return nil, err
-	}
-	if s.redis != nil {
-		_ = s.redis.Del(context.Background(), enableFailKey(adminID)).Err()
-	}
-	return &EnableResult{EnabledAt: enabledAt, RecoveryCodes: plaintextCodes}, nil
+	return &EnableResult{EnabledAt: prepared.enabledAt, RecoveryCodes: prepared.recoveryCodes}, nil
 }
 
 // Disable 关闭 2FA：使用 TOTP code 或恢复码二次确认
@@ -337,6 +308,29 @@ func (s *TOTPService) consumeRecoveryCode(admin *models.Admin, code string) erro
 		return err
 	}
 	return s.adminRepo.UpdateRecoveryCodes(admin.ID, js)
+}
+
+func (s *TOTPService) loadTOTPEnableSubject(adminID uint) (totpEnableSubject, error) {
+	admin, err := s.adminRepo.GetByID(adminID)
+	if err != nil || admin == nil {
+		return totpEnableSubject{}, err
+	}
+	return totpEnableSubject{
+		exists:           true,
+		enabledAt:        admin.TOTPEnabledAt,
+		pendingSecret:    admin.TOTPPendingSecret,
+		pendingExpiresAt: admin.TOTPPendingExpiresAt,
+	}, nil
+}
+
+func (s *TOTPService) updateTOTPEnabledFromPrepared(adminID uint, result *totpEnableResult) error {
+	return s.adminRepo.UpdateTOTPEnabled(adminID, result.encryptedSecret, result.enabledAt, result.recoveryCodesJSON)
+}
+
+func (s *TOTPService) clearTOTPEnableFailures(adminID uint) {
+	if s.redis != nil {
+		_ = s.redis.Del(context.Background(), enableFailKey(adminID)).Err()
+	}
 }
 
 func enableFailKey(adminID uint) string {
