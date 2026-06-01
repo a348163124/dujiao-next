@@ -40,6 +40,9 @@ func (h *Handler) PaymentCallback(c *gin.Context) {
 	if handled := h.HandleBepusdtCallback(c); handled {
 		return
 	}
+	if handled := h.HandleHuifuCallback(c); handled {
+		return
+	}
 	shared.RequestLog(c).Warnw("payment_callback_unrecognized",
 		"method", c.Request.Method,
 		"client_ip", c.ClientIP(),

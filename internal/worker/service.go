@@ -72,6 +72,15 @@ func registerPeriodicTasks(scheduler *asynq.Scheduler, consumer *Consumer, cfg *
 			logger.Infow("scheduler_register_upstream_sync_stock_ok", "entry_id", entryID, "interval", syncInterval)
 		}
 	}
+	if consumer.PaymentService != nil {
+		task := queue.NewPaymentCompensationTask()
+		entryID, err := scheduler.Register("@every 1m", task, asynq.Queue(queue.DefaultQueue))
+		if err != nil {
+			logger.Warnw("scheduler_register_payment_compensation_failed", "error", err)
+		} else {
+			logger.Infow("scheduler_register_payment_compensation_ok", "entry_id", entryID)
+		}
+	}
 	if consumer.NotificationService != nil {
 		task, err := queue.NewNotificationInventoryAlertCheckTask()
 		if err != nil {

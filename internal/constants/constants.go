@@ -46,6 +46,7 @@ const (
 	PaymentProviderBepusdt  = "bepusdt"
 	PaymentProviderOkpay    = "okpay"
 	PaymentProviderTokenpay = "tokenpay"
+	PaymentProviderHuifu    = "huifu"
 	PaymentProviderWallet   = "wallet"
 )
 
@@ -61,6 +62,7 @@ const (
 	PaymentChannelTypeUsdtTrc20 = "usdt-trc20"
 	PaymentChannelTypeUsdcTrc20 = "usdc-trc20"
 	PaymentChannelTypeTrx       = "trx"
+	PaymentChannelTypeCashier   = "cashier"
 	PaymentChannelTypeBalance   = "balance"
 )
 
@@ -181,6 +183,12 @@ const (
 const (
 	TokenPayCallbackSuccess = "ok"
 	TokenPayCallbackFail    = "fail"
+)
+
+// Huifu 回调常量
+const (
+	HuifuCallbackSuccess = "success"
+	HuifuCallbackFail    = "fail"
 )
 
 // 文章类型常量
@@ -322,6 +330,7 @@ const (
 	TaskOrderAutoFulfill            = "order:auto_fulfill"
 	TaskOrderTimeoutCancel          = "order:timeout_cancel"
 	TaskWalletRechargeExpire        = "wallet_recharge:timeout_expire"
+	TaskPaymentCompensation         = "payment:compensation"
 	TaskNotificationDispatch        = "notification:dispatch"
 	TaskAffiliateConfirmCommissions = "affiliate:confirm_commissions"
 	TaskProcurementSubmit           = "procurement:submit"

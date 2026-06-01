@@ -35,10 +35,10 @@ func (s *PaymentService) CapturePayment(input CapturePaymentInput) (*models.Paym
 	}
 
 	providerType := strings.ToLower(strings.TrimSpace(channel.ProviderType))
-	if providerType != constants.PaymentProviderOfficial {
+	if providerType != constants.PaymentProviderOfficial && providerType != constants.PaymentProviderHuifu {
 		return nil, ErrPaymentProviderNotSupported
 	}
-	if strings.TrimSpace(payment.ProviderRef) == "" {
+	if strings.TrimSpace(payment.ProviderRef) == "" && strings.TrimSpace(payment.GatewayOrderNo) == "" {
 		return nil, ErrPaymentInvalid
 	}
 
@@ -83,31 +83,14 @@ func (s *PaymentService) captureViaRegistry(input CapturePaymentInput, payment *
 	ctx, cancel := detachOutboundRequestContext(input.Context)
 	defer cancel()
 
-	queryResult, err := capturer.QueryPayment(ctx, channel.ConfigJSON, payment.ProviderRef)
-	if err != nil {
-		return nil, mapProviderErrorToService(err)
+	queryRef := strings.TrimSpace(payment.ProviderRef)
+	if strings.ToLower(strings.TrimSpace(channel.ProviderType)) == constants.PaymentProviderHuifu {
+		queryRef = strings.TrimSpace(payment.GatewayOrderNo)
 	}
-
-	payload := models.JSON{}
-	if queryResult.Payload != nil {
-		payload = queryResult.Payload
+	if queryRef == "" {
+		return nil, ErrPaymentInvalid
 	}
-	status := strings.TrimSpace(queryResult.Status)
-	if status == "" {
-		status = constants.PaymentStatusPending
-	}
-
-	callbackInput := PaymentCallbackInput{
-		PaymentID:   payment.ID,
-		ChannelID:   channel.ID,
-		Status:      status,
-		ProviderRef: pickFirstNonEmpty(queryResult.ProviderRef, payment.ProviderRef),
-		Amount:      queryResult.Amount,
-		Currency:    strings.ToUpper(strings.TrimSpace(queryResult.Currency)),
-		PaidAt:      queryResult.PaidAt,
-		Payload:     payload,
-	}
-	return s.HandleCallback(callbackInput)
+	return s.queryPaymentViaRegistry(ctx, payment, channel, queryRef)
 }
 
 // mapProviderErrorToService 把 provider.ErrXxx 转换为 service 层的 ErrPaymentXxx。

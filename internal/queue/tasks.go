@@ -17,6 +17,8 @@ const (
 	TaskOrderTimeoutCancel = constants.TaskOrderTimeoutCancel
 	// TaskWalletRechargeExpire 钱包充值超时过期任务
 	TaskWalletRechargeExpire = constants.TaskWalletRechargeExpire
+	// TaskPaymentCompensation 支付状态补偿任务
+	TaskPaymentCompensation = constants.TaskPaymentCompensation
 	// TaskNotificationDispatch 通知中心分发任务
 	TaskNotificationDispatch = constants.TaskNotificationDispatch
 	// TaskAffiliateConfirmCommissions 佣金到期确认任务
@@ -105,6 +107,11 @@ func NewWalletRechargeExpireTask(payload WalletRechargeExpirePayload) (*asynq.Ta
 		return nil, err
 	}
 	return asynq.NewTask(TaskWalletRechargeExpire, body), nil
+}
+
+// NewPaymentCompensationTask 创建支付状态补偿任务
+func NewPaymentCompensationTask() *asynq.Task {
+	return asynq.NewTask(TaskPaymentCompensation, nil)
 }
 
 // NewNotificationDispatchTask 创建通知中心分发任务

@@ -903,13 +903,35 @@ func buildOrderSubject(order *models.Order) string {
 	if order == nil {
 		return ""
 	}
-	if len(order.Items) > 0 {
-		title := pickOrderItemTitle(order.Items[0].TitleJSON)
+	if item := firstOrderItem(order); item != nil {
+		title := pickOrderItemTitle(item.TitleJSON)
 		if title != "" {
 			return title
 		}
 	}
 	return order.OrderNo
+}
+
+func firstOrderProductID(order *models.Order) uint {
+	if item := firstOrderItem(order); item != nil {
+		return item.ProductID
+	}
+	return 0
+}
+
+func firstOrderItem(order *models.Order) *models.OrderItem {
+	if order == nil {
+		return nil
+	}
+	if len(order.Items) > 0 {
+		return &order.Items[0]
+	}
+	for i := range order.Children {
+		if item := firstOrderItem(&order.Children[i]); item != nil {
+			return item
+		}
+	}
+	return nil
 }
 
 func pickOrderItemTitle(title models.JSON) string {

@@ -424,7 +424,7 @@ func (s *PaymentService) markOrderPaid(tx *gorm.DB, order *models.Order, now tim
 	if order == nil {
 		return ErrOrderNotFound
 	}
-	if !isTransitionAllowed(order.Status, constants.OrderStatusPaid) {
+	if !isTransitionAllowed(order.Status, constants.OrderStatusPaid) && order.Status != constants.OrderStatusCanceled {
 		return ErrOrderStatusInvalid
 	}
 	orderRepo := s.orderRepo.WithTx(tx)

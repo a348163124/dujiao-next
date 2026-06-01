@@ -1,0 +1,5 @@
+.git
+.cache
+.tmp-go
+*.log
+node_modules

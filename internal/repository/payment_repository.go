@@ -22,6 +22,7 @@ type PaymentRepository interface {
 	GetLatestByProviderRef(providerRef string) (*models.Payment, error)
 	ListByOrderID(orderID uint) ([]models.Payment, error)
 	GetLatestPendingByOrder(orderID uint, now time.Time) (*models.Payment, error)
+	ListPendingByProvider(providerType string, before time.Time, limit int) ([]models.Payment, error)
 	ExpirePendingByOrderIDs(orderIDs []uint, expiredAt time.Time) (int64, error)
 	ListAdmin(filter PaymentListFilter) ([]models.Payment, int64, error)
 	Transaction(fn func(tx *gorm.DB) error) error
@@ -160,6 +161,28 @@ func (r *GormPaymentRepository) GetLatestPendingByOrderChannel(orderID uint, cha
 		return nil, nil
 	}
 	return &payment, nil
+}
+
+func (r *GormPaymentRepository) ListPendingByProvider(providerType string, before time.Time, limit int) ([]models.Payment, error) {
+	providerType = strings.TrimSpace(providerType)
+	if providerType == "" {
+		return []models.Payment{}, nil
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	var payments []models.Payment
+	query := r.db.Where("provider_type = ? AND status IN ?",
+		providerType,
+		[]string{constants.PaymentStatusInitiated, constants.PaymentStatusPending, constants.PaymentStatusExpired},
+	)
+	if !before.IsZero() {
+		query = query.Where("created_at <= ?", before)
+	}
+	if err := query.Order("id asc").Limit(limit).Find(&payments).Error; err != nil {
+		return nil, err
+	}
+	return payments, nil
 }
 
 // ExpirePendingByOrderIDs 将指定订单的未完成支付记录标记为过期。

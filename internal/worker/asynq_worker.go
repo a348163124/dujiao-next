@@ -47,6 +47,7 @@ func (c *Consumer) Register(mux *asynq.ServeMux) {
 	mux.HandleFunc(queue.TaskOrderAutoFulfill, withPanicRecovery(queue.TaskOrderAutoFulfill, c.handleOrderAutoFulfill))
 	mux.HandleFunc(queue.TaskOrderTimeoutCancel, withPanicRecovery(queue.TaskOrderTimeoutCancel, c.handleOrderTimeoutCancel))
 	mux.HandleFunc(queue.TaskWalletRechargeExpire, withPanicRecovery(queue.TaskWalletRechargeExpire, c.handleWalletRechargeExpire))
+	mux.HandleFunc(queue.TaskPaymentCompensation, withPanicRecovery(queue.TaskPaymentCompensation, c.handlePaymentCompensation))
 	mux.HandleFunc(queue.TaskNotificationDispatch, withPanicRecovery(queue.TaskNotificationDispatch, c.handleNotificationDispatch))
 	mux.HandleFunc(queue.TaskAffiliateConfirmCommissions, withPanicRecovery(queue.TaskAffiliateConfirmCommissions, c.handleAffiliateConfirmCommissions))
 	mux.HandleFunc(queue.TaskUpstreamSyncStock, withPanicRecovery(queue.TaskUpstreamSyncStock, c.handleUpstreamSyncStock))
@@ -347,6 +348,19 @@ func (c *Consumer) handleWalletRechargeExpire(_ context.Context, task *asynq.Tas
 			logger.Warnw("worker_wallet_recharge_expire_failed", "payment_id", payload.PaymentID, "error", err)
 			return err
 		}
+	}
+	return nil
+}
+
+func (c *Consumer) handlePaymentCompensation(ctx context.Context, _ *asynq.Task) error {
+	if c == nil || c.PaymentService == nil {
+		logger.Debugw("worker_payment_compensation_skip_nil")
+		return nil
+	}
+	_, err := c.PaymentService.CompensateHuifuPayments(ctx)
+	if err != nil {
+		logger.Warnw("worker_payment_compensation_failed", "error", err)
+		return err
 	}
 	return nil
 }
