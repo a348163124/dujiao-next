@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/dujiao-next/internal/constants"
@@ -25,6 +26,7 @@ type PromotionRepository interface {
 // PromotionListFilter 活动价列表筛选
 type PromotionListFilter struct {
 	ID         uint
+	Name       string
 	ScopeRefID uint
 	IsActive   *bool
 	Page       int
@@ -110,6 +112,10 @@ func (r *GormPromotionRepository) List(filter PromotionListFilter) ([]models.Pro
 
 	if filter.ID != 0 {
 		query = query.Where("id = ?", filter.ID)
+	}
+	if name := strings.TrimSpace(filter.Name); name != "" {
+		// LOWER(...) LIKE LOWER(?) 保证 SQLite 与 PostgreSQL 大小写不敏感行为一致
+		query = query.Where("LOWER(name) LIKE LOWER(?)", "%"+name+"%")
 	}
 	if filter.ScopeRefID != 0 {
 		query = query.Where("scope_ref_id = ?", filter.ScopeRefID)

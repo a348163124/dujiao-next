@@ -160,6 +160,7 @@ func (h *Handler) GetAdminPromotions(c *gin.Context) {
 
 	promotions, total, err := h.PromotionAdminService.List(repository.PromotionListFilter{
 		ID:         id,
+		Name:       c.Query("name"),
 		ScopeRefID: scopeRefID,
 		IsActive:   isActive,
 		Page:       page,
