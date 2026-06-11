@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,8 @@ func setupWholesaleOrderFixture(t *testing.T, name string, wholesalePrices model
 		&models.Product{},
 		&models.ProductSKU{},
 		&models.Promotion{},
+		&models.Coupon{},
+		&models.CouponUsage{},
 		&models.User{},
 		&models.MemberLevel{},
 		&models.MemberLevelPrice{},
@@ -131,6 +134,8 @@ func setupWholesaleOrderFixture(t *testing.T, name string, wholesalePrices model
 		ProductRepo:        repository.NewProductRepository(db),
 		ProductSKURepo:     repository.NewProductSKURepository(db),
 		PromotionRepo:      repository.NewPromotionRepository(db),
+		CouponRepo:         repository.NewCouponRepository(db),
+		CouponUsageRepo:    repository.NewCouponUsageRepository(db),
 		MemberLevelService: NewMemberLevelService(levelRepo, priceRepo, userRepo),
 		ExpireMinutes:      15,
 	})
@@ -196,6 +201,94 @@ func TestBuildOrderResultPrefersPromotionOverWholesale(t *testing.T) {
 	item := result.Plans[0].Item
 	if item.UnitPrice.String() != "70.00" || item.PromotionDiscount.String() != "150.00" || item.WholesaleDiscount.String() != "0.00" {
 		t.Fatalf("unexpected item price result: unit=%s wholesale=%s promotion=%s", item.UnitPrice.String(), item.WholesaleDiscount.String(), item.PromotionDiscount.String())
+	}
+}
+
+func TestBuildOrderResultAppliesCouponAfterBestPromotionOrWholesalePrice(t *testing.T) {
+	tests := []struct {
+		name              string
+		promotionPercent  decimal.Decimal
+		wantPromotion     decimal.Decimal
+		wantWholesale     decimal.Decimal
+		wantCoupon        decimal.Decimal
+		wantTotal         decimal.Decimal
+		wantUnitPrice     string
+		wantCouponPerItem string
+	}{
+		{
+			name:              "wholesale wins before coupon",
+			promotionPercent:  decimal.NewFromInt(10),
+			wantPromotion:     decimal.Zero,
+			wantWholesale:     decimal.NewFromInt(100),
+			wantCoupon:        decimal.NewFromInt(40),
+			wantTotal:         decimal.NewFromInt(360),
+			wantUnitPrice:     "80.00",
+			wantCouponPerItem: "40.00",
+		},
+		{
+			name:              "promotion wins before coupon",
+			promotionPercent:  decimal.NewFromInt(30),
+			wantPromotion:     decimal.NewFromInt(150),
+			wantWholesale:     decimal.Zero,
+			wantCoupon:        decimal.NewFromInt(35),
+			wantTotal:         decimal.NewFromInt(315),
+			wantUnitPrice:     "70.00",
+			wantCouponPerItem: "35.00",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wholesalePrices := models.WholesalePriceTiers{
+				{MinQuantity: 5, UnitPrice: models.NewMoneyFromDecimal(decimal.NewFromInt(80))},
+			}
+			fixture := setupWholesaleOrderFixture(t, strings.ReplaceAll(tc.name, " ", "_"), wholesalePrices, &tc.promotionPercent, nil)
+			coupon := models.Coupon{
+				Code:        "STACK10",
+				Type:        constants.CouponTypePercent,
+				Value:       models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
+				MinAmount:   models.NewMoneyFromDecimal(decimal.Zero),
+				MaxDiscount: models.NewMoneyFromDecimal(decimal.Zero),
+				ScopeType:   constants.ScopeTypeProduct,
+				ScopeRefIDs: fmt.Sprintf("[%d]", fixture.product.ID),
+				IsActive:    true,
+				CreatedAt:   time.Now(),
+				UpdatedAt:   time.Now(),
+			}
+			if err := fixture.db.Create(&coupon).Error; err != nil {
+				t.Fatalf("create coupon failed: %v", err)
+			}
+
+			result, err := fixture.svc.buildOrderResult(orderCreateParams{
+				CouponCode: "STACK10",
+				Items: []CreateOrderItem{
+					{ProductID: fixture.product.ID, SKUID: fixture.sku.ID, Quantity: 5},
+				},
+			})
+			if err != nil {
+				t.Fatalf("buildOrderResult failed: %v", err)
+			}
+
+			if !result.PromotionDiscountAmount.Equal(tc.wantPromotion) {
+				t.Fatalf("expected promotion discount %s, got %s", tc.wantPromotion.String(), result.PromotionDiscountAmount.String())
+			}
+			if !result.WholesaleDiscountAmount.Equal(tc.wantWholesale) {
+				t.Fatalf("expected wholesale discount %s, got %s", tc.wantWholesale.String(), result.WholesaleDiscountAmount.String())
+			}
+			if !result.DiscountAmount.Equal(tc.wantCoupon) {
+				t.Fatalf("expected coupon discount %s, got %s", tc.wantCoupon.String(), result.DiscountAmount.String())
+			}
+			if !result.TotalAmount.Equal(tc.wantTotal) {
+				t.Fatalf("expected total %s, got %s", tc.wantTotal.String(), result.TotalAmount.String())
+			}
+			if len(result.Plans) != 1 {
+				t.Fatalf("expected one plan, got %d", len(result.Plans))
+			}
+			item := result.Plans[0].Item
+			if item.UnitPrice.String() != tc.wantUnitPrice || item.CouponDiscount.String() != tc.wantCouponPerItem {
+				t.Fatalf("unexpected item result: unit=%s coupon=%s", item.UnitPrice.String(), item.CouponDiscount.String())
+			}
+		})
 	}
 }
 
