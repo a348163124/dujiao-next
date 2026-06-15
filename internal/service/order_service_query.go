@@ -242,6 +242,25 @@ func (s *OrderService) GetOrderByUser(orderID uint, userID uint) (*models.Order,
 	return order, nil
 }
 
+// GetOrderByUserForTenant 获取当前租户上下文中的用户订单详情。
+func (s *OrderService) GetOrderByUserForTenant(tenant TenantContext, orderID uint, userID uint) (*models.Order, error) {
+	order, err := s.orderRepo.GetByIDAndUserScoped(orderID, userID, orderScopeFromTenant(tenant))
+	if err != nil {
+		return nil, ErrOrderFetchFailed
+	}
+	if order == nil {
+		return nil, ErrOrderNotFound
+	}
+	if err := s.ensureOrderCanceledIfExpired(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	if err := s.ensureOrderRefundStatusSynced(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	fillOrderItemsFromChildren(order)
+	return order, nil
+}
+
 // GetOrderByUserOrderNo 按订单号获取用户订单详情
 func (s *OrderService) GetOrderByUserOrderNo(orderNo string, userID uint) (*models.Order, error) {
 	orderNo = strings.TrimSpace(orderNo)
@@ -249,6 +268,52 @@ func (s *OrderService) GetOrderByUserOrderNo(orderNo string, userID uint) (*mode
 		return nil, ErrOrderNotFound
 	}
 	order, err := s.orderRepo.GetByOrderNoAndUser(orderNo, userID)
+	if err != nil {
+		return nil, ErrOrderFetchFailed
+	}
+	if order == nil {
+		return nil, ErrOrderNotFound
+	}
+	if err := s.ensureOrderCanceledIfExpired(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	if err := s.ensureOrderRefundStatusSynced(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	fillOrderItemsFromChildren(order)
+	return order, nil
+}
+
+// GetOrderByUserOrderNoForTenant 按订单号获取当前租户上下文中的用户订单详情。
+func (s *OrderService) GetOrderByUserOrderNoForTenant(tenant TenantContext, orderNo string, userID uint) (*models.Order, error) {
+	orderNo = strings.TrimSpace(orderNo)
+	if orderNo == "" {
+		return nil, ErrOrderNotFound
+	}
+	order, err := s.orderRepo.GetByOrderNoAndUserScoped(orderNo, userID, orderScopeFromTenant(tenant))
+	if err != nil {
+		return nil, ErrOrderFetchFailed
+	}
+	if order == nil {
+		return nil, ErrOrderNotFound
+	}
+	if err := s.ensureOrderCanceledIfExpired(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	if err := s.ensureOrderRefundStatusSynced(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	fillOrderItemsFromChildren(order)
+	return order, nil
+}
+
+// GetAnyOrderByUserOrderNoForTenant 支持父订单或子订单号获取当前租户上下文中的用户订单。
+func (s *OrderService) GetAnyOrderByUserOrderNoForTenant(tenant TenantContext, orderNo string, userID uint) (*models.Order, error) {
+	orderNo = strings.TrimSpace(orderNo)
+	if orderNo == "" {
+		return nil, ErrOrderNotFound
+	}
+	order, err := s.orderRepo.GetAnyByOrderNoAndUserScoped(orderNo, userID, orderScopeFromTenant(tenant))
 	if err != nil {
 		return nil, ErrOrderFetchFailed
 	}
@@ -285,10 +350,70 @@ func (s *OrderService) GetOrderByGuest(orderID uint, email, password string) (*m
 	return order, nil
 }
 
+// GetOrderByGuestForTenant 获取当前租户上下文中的游客订单详情。
+func (s *OrderService) GetOrderByGuestForTenant(tenant TenantContext, orderID uint, email, password string) (*models.Order, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	order, err := s.orderRepo.GetByIDAndGuestScoped(orderID, email, password, orderScopeFromTenant(tenant))
+	if err != nil {
+		return nil, ErrOrderFetchFailed
+	}
+	if order == nil {
+		return nil, ErrGuestOrderNotFound
+	}
+	if err := s.ensureOrderCanceledIfExpired(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	if err := s.ensureOrderRefundStatusSynced(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	fillOrderItemsFromChildren(order)
+	return order, nil
+}
+
 // GetOrderByGuestOrderNo 获取游客订单详情（按订单号）
 func (s *OrderService) GetOrderByGuestOrderNo(orderNo, email, password string) (*models.Order, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	order, err := s.orderRepo.GetByOrderNoAndGuest(orderNo, email, password)
+	if err != nil {
+		return nil, ErrOrderFetchFailed
+	}
+	if order == nil {
+		return nil, ErrGuestOrderNotFound
+	}
+	if err := s.ensureOrderCanceledIfExpired(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	if err := s.ensureOrderRefundStatusSynced(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	fillOrderItemsFromChildren(order)
+	return order, nil
+}
+
+// GetOrderByGuestOrderNoForTenant 获取当前租户上下文中的游客订单详情（按订单号）。
+func (s *OrderService) GetOrderByGuestOrderNoForTenant(tenant TenantContext, orderNo, email, password string) (*models.Order, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	order, err := s.orderRepo.GetByOrderNoAndGuestScoped(orderNo, email, password, orderScopeFromTenant(tenant))
+	if err != nil {
+		return nil, ErrOrderFetchFailed
+	}
+	if order == nil {
+		return nil, ErrGuestOrderNotFound
+	}
+	if err := s.ensureOrderCanceledIfExpired(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	if err := s.ensureOrderRefundStatusSynced(order); err != nil {
+		return nil, ErrOrderUpdateFailed
+	}
+	fillOrderItemsFromChildren(order)
+	return order, nil
+}
+
+// GetAnyOrderByGuestOrderNoForTenant 支持父订单或子订单号获取当前租户上下文中的游客订单。
+func (s *OrderService) GetAnyOrderByGuestOrderNoForTenant(tenant TenantContext, orderNo, email, password string) (*models.Order, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	order, err := s.orderRepo.GetAnyByOrderNoAndGuestScoped(orderNo, email, password, orderScopeFromTenant(tenant))
 	if err != nil {
 		return nil, ErrOrderFetchFailed
 	}
@@ -324,12 +449,43 @@ func (s *OrderService) ListOrdersByUser(filter repository.OrderListFilter) ([]mo
 	return orders, total, nil
 }
 
+// ListOrdersByUserForTenant 获取当前租户上下文中的用户订单列表。
+func (s *OrderService) ListOrdersByUserForTenant(tenant TenantContext, filter repository.OrderListFilter) ([]models.Order, int64, error) {
+	if filter.UserID == 0 {
+		return nil, 0, ErrOrderFetchFailed
+	}
+	orders, total, err := s.orderRepo.ListByUserScoped(filter, orderScopeFromTenant(tenant))
+	if err != nil {
+		return nil, 0, ErrOrderFetchFailed
+	}
+	if err := s.ensureOrdersCanceledIfExpired(orders); err != nil {
+		return nil, 0, ErrOrderUpdateFailed
+	}
+	if err := s.ensureOrdersRefundStatusSynced(orders); err != nil {
+		return nil, 0, ErrOrderUpdateFailed
+	}
+	fillOrdersItemsFromChildren(orders)
+	return orders, total, nil
+}
+
 // StatsOrdersByUser 按状态聚合用户订单数量（基于全量数据，仅复用关键词筛选）
 func (s *OrderService) StatsOrdersByUser(filter repository.OrderListFilter) (map[string]int64, error) {
 	if filter.UserID == 0 {
 		return nil, ErrOrderFetchFailed
 	}
 	stats, err := s.orderRepo.StatsByUser(filter)
+	if err != nil {
+		return nil, ErrOrderFetchFailed
+	}
+	return stats, nil
+}
+
+// StatsOrdersByUserForTenant 按状态聚合当前租户上下文中的用户订单数量。
+func (s *OrderService) StatsOrdersByUserForTenant(tenant TenantContext, filter repository.OrderListFilter) (map[string]int64, error) {
+	if filter.UserID == 0 {
+		return nil, ErrOrderFetchFailed
+	}
+	stats, err := s.orderRepo.StatsByUserScoped(filter, orderScopeFromTenant(tenant))
 	if err != nil {
 		return nil, ErrOrderFetchFailed
 	}
@@ -351,6 +507,30 @@ func (s *OrderService) ListOrdersByGuest(email, password string, page, pageSize 
 	}
 	fillOrdersItemsFromChildren(orders)
 	return orders, total, nil
+}
+
+// ListOrdersByGuestForTenant 获取当前租户上下文中的游客订单列表。
+func (s *OrderService) ListOrdersByGuestForTenant(tenant TenantContext, email, password string, page, pageSize int) ([]models.Order, int64, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	orders, total, err := s.orderRepo.ListByGuestScoped(email, password, page, pageSize, orderScopeFromTenant(tenant))
+	if err != nil {
+		return nil, 0, ErrOrderFetchFailed
+	}
+	if err := s.ensureOrdersCanceledIfExpired(orders); err != nil {
+		return nil, 0, ErrOrderUpdateFailed
+	}
+	if err := s.ensureOrdersRefundStatusSynced(orders); err != nil {
+		return nil, 0, ErrOrderUpdateFailed
+	}
+	fillOrdersItemsFromChildren(orders)
+	return orders, total, nil
+}
+
+func orderScopeFromTenant(tenant TenantContext) repository.ResellerOrderScope {
+	if isResellerOrderContext(tenant) && tenant.ResellerID != nil {
+		return repository.ResellerOrderScope{ResellerID: tenant.ResellerID}
+	}
+	return repository.ResellerOrderScope{}
 }
 
 // ListOrdersForAdmin 管理端订单列表

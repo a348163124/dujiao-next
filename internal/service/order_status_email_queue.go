@@ -7,13 +7,19 @@ import (
 	"github.com/dujiao-next/internal/queue"
 	"github.com/dujiao-next/internal/repository"
 	"github.com/dujiao-next/internal/telegramidentity"
+
+	"github.com/hibiken/asynq"
 )
+
+type orderStatusEmailQueue interface {
+	EnqueueOrderStatusEmail(payload queue.OrderStatusEmailPayload, opts ...asynq.Option) error
+}
 
 // enqueueOrderStatusEmailTaskIfEligible 根据订单接收邮箱策略决定是否入队状态邮件任务。
 // 返回值 skipped 表示任务被策略跳过（例如 Telegram 占位邮箱）。
 func enqueueOrderStatusEmailTaskIfEligible(
 	orderRepo repository.OrderRepository,
-	queueClient *queue.Client,
+	queueClient orderStatusEmailQueue,
 	settingService *SettingService,
 	defaultEmailConfig config.EmailConfig,
 	orderID uint,

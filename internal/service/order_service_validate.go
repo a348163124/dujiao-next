@@ -23,6 +23,10 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 	if input.IsGuest && input.GuestPassword == "" {
 		return nil, ErrGuestPasswordRequired
 	}
+	resellerOrder := isResellerOrderContext(input.Tenant)
+	if resellerOrder && strings.TrimSpace(input.CouponCode) != "" {
+		return nil, ErrResellerCouponNotAllowed
+	}
 
 	mergedItems, err := mergeCreateOrderItems(input.Items)
 	if err != nil {
@@ -55,7 +59,7 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 	// 解析用户会员等级
 	var userMemberLevelID uint
 	var memberLevelIDSnapshot *uint
-	if input.UserID > 0 && s.userRepo != nil {
+	if !resellerOrder && input.UserID > 0 && s.userRepo != nil {
 		user, _ := s.userRepo.GetByID(input.UserID)
 		if user != nil && user.MemberLevelID > 0 {
 			userMemberLevelID = user.MemberLevelID
@@ -64,7 +68,10 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 		}
 	}
 
-	promotionService := NewPromotionService(s.promotionRepo)
+	var promotionService *PromotionService
+	if !resellerOrder {
+		promotionService = NewPromotionService(s.promotionRepo)
+	}
 	manualFormData := input.ManualFormData
 	if manualFormData == nil {
 		manualFormData = map[string]models.JSON{}
@@ -101,11 +108,16 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 		// 1. 计算活动价
 		priceCarrier := *product
 		priceCarrier.PriceAmount = sku.PriceAmount
-		promotion, promoUnitPrice, err := promotionService.ApplyPromotion(&priceCarrier, item.Quantity)
-		if err != nil {
-			return nil, err
+		var promotion *models.Promotion
+		promoUnitPriceAmount := basePrice
+		if promotionService != nil {
+			var promoUnitPrice models.Money
+			promotion, promoUnitPrice, err = promotionService.ApplyPromotion(&priceCarrier, item.Quantity)
+			if err != nil {
+				return nil, err
+			}
+			promoUnitPriceAmount = promoUnitPrice.Decimal.Round(2)
 		}
-		promoUnitPriceAmount := promoUnitPrice.Decimal.Round(2)
 
 		// 2. 活动价与批发价取更优单价，避免两个商品级阶梯价叠加造成不可预期折扣。
 		unitPriceAmount := promoUnitPriceAmount
@@ -120,7 +132,12 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 		if wholesaleMatchQuantity <= 0 {
 			wholesaleMatchQuantity = item.Quantity
 		}
-		wholesaleUnitPrice, wholesaleDiscount, wholesaleMatched := ResolveWholesaleUnitPriceWithMatchQuantity(product, basePrice, wholesaleMatchQuantity, item.Quantity)
+		var wholesaleUnitPrice decimal.Decimal
+		wholesaleDiscount := decimal.Zero
+		wholesaleMatched := false
+		if !resellerOrder {
+			wholesaleUnitPrice, wholesaleDiscount, wholesaleMatched = ResolveWholesaleUnitPriceWithMatchQuantity(product, basePrice, wholesaleMatchQuantity, item.Quantity)
+		}
 		if wholesaleMatched && wholesaleUnitPrice.LessThan(unitPriceAmount) {
 			unitPriceAmount = wholesaleUnitPrice
 			promotion = nil
@@ -135,7 +152,7 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 
 		// 3. 在已命中的商品级优惠单价基础上应用会员价。
 		itemMemberDiscount := decimal.Zero
-		if userMemberLevelID > 0 && s.memberLevelService != nil {
+		if !resellerOrder && userMemberLevelID > 0 && s.memberLevelService != nil {
 			memberUnitPrice, _ := s.memberLevelService.ResolveMemberPrice(userMemberLevelID, product.ID, sku.ID, unitPriceAmount)
 			if memberUnitPrice.LessThan(unitPriceAmount) {
 				itemMemberDiscount = unitPriceAmount.Sub(memberUnitPrice).
@@ -256,7 +273,7 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 	discountAmount := decimal.Zero
 	var appliedCoupon *models.Coupon
 	couponCode := strings.TrimSpace(input.CouponCode)
-	if couponCode != "" {
+	if !resellerOrder && couponCode != "" {
 		couponService := NewCouponService(s.couponRepo, s.couponUsageRepo)
 		discount, coupon, err := couponService.ApplyCoupon(
 			models.NewMoneyFromDecimal(originalAmount),

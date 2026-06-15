@@ -73,6 +73,9 @@ func (r *GormProductRepository) List(filter ProductListFilter) ([]models.Product
 	} else if filter.CategoryID != "" {
 		query = query.Where("category_id = ?", filter.CategoryID)
 	}
+	if len(filter.ExcludeProductIDs) > 0 {
+		query = query.Where("products.id NOT IN ?", filter.ExcludeProductIDs)
+	}
 	if fulfillmentType := strings.TrimSpace(filter.FulfillmentType); fulfillmentType != "" {
 		query = query.Where("fulfillment_type = ?", fulfillmentType)
 	}

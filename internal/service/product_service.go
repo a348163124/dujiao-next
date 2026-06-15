@@ -166,6 +166,35 @@ func (s *ProductService) ListPublic(categoryID, search string, page, pageSize in
 	return s.repo.List(filter)
 }
 
+// ListPublicForTenant 获取当前租户上下文的公开商品列表。
+func (s *ProductService) ListPublicForTenant(tenant TenantContext, resellerRepo repository.ResellerRepository, categoryID, search string, page, pageSize int) ([]models.Product, int64, error) {
+	if !isResellerOrderContext(tenant) {
+		return s.ListPublic(categoryID, search, page, pageSize)
+	}
+	if tenant.ResellerID == nil || resellerRepo == nil {
+		return nil, 0, ErrResellerProductNotListed
+	}
+	categoryIDs, err := expandPublicCategoryIDs(s.categoryRepo, categoryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	hiddenIDs, err := resellerRepo.ListHiddenProductIDs(*tenant.ResellerID)
+	if err != nil {
+		return nil, 0, err
+	}
+	filter := repository.ProductListFilter{
+		Page:              page,
+		PageSize:          pageSize,
+		CategoryID:        categoryID,
+		CategoryIDs:       categoryIDs,
+		Search:            search,
+		OnlyActive:        true,
+		WithCategory:      true,
+		ExcludeProductIDs: hiddenIDs,
+	}
+	return s.repo.List(filter)
+}
+
 // ListForUpstreamSync 上游同步专用：可选包含已下架商品，便于下游识别下架状态
 // includeInactive=true 时返回所有未软删商品（含 is_active=false）
 func (s *ProductService) ListForUpstreamSync(updatedAfter *time.Time, includeInactive bool, page, pageSize int) ([]models.Product, int64, error) {
@@ -199,6 +228,30 @@ func (s *ProductService) GetPublicBySlug(slug string) (*models.Product, error) {
 	}
 	if product == nil {
 		return nil, ErrNotFound
+	}
+	return product, nil
+}
+
+// GetPublicBySlugForTenant 获取当前租户上下文的公开商品详情。
+func (s *ProductService) GetPublicBySlugForTenant(tenant TenantContext, resellerRepo repository.ResellerRepository, slug string) (*models.Product, error) {
+	product, err := s.GetPublicBySlug(slug)
+	if err != nil {
+		return nil, err
+	}
+	if !isResellerOrderContext(tenant) {
+		return product, nil
+	}
+	if tenant.ResellerID == nil || resellerRepo == nil {
+		return nil, ErrNotFound
+	}
+	hiddenIDs, err := resellerRepo.ListHiddenProductIDs(*tenant.ResellerID)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range hiddenIDs {
+		if id == product.ID {
+			return nil, ErrNotFound
+		}
 	}
 	return product, nil
 }

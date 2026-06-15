@@ -60,7 +60,8 @@ func (h *Handler) CreatePayment(c *gin.Context) {
 		return
 	}
 
-	order, err := h.OrderService.GetOrderByUserOrderNo(req.OrderNo, uid)
+	tenant := tenantFromRequest(c)
+	order, err := h.OrderService.GetOrderByUserOrderNoForTenant(tenant, req.OrderNo, uid)
 	if err != nil {
 		if errors.Is(err, service.ErrOrderNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.order_not_found", nil)
@@ -105,7 +106,7 @@ func (h *Handler) CapturePayment(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.payment_fetch_failed", err)
 		return
 	}
-	if _, err := h.OrderService.GetOrderByUser(payment.OrderID, uid); err != nil {
+	if _, err := h.OrderService.GetOrderByUserForTenant(tenantFromRequest(c), payment.OrderID, uid); err != nil {
 		if errors.Is(err, service.ErrOrderNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.order_not_found", nil)
 			return
@@ -140,7 +141,7 @@ func (h *Handler) GetLatestPayment(c *gin.Context) {
 		return
 	}
 
-	order, err := h.OrderService.GetOrderByUserOrderNo(query.OrderNo, uid)
+	order, err := h.OrderService.GetOrderByUserOrderNoForTenant(tenantFromRequest(c), query.OrderNo, uid)
 	if err != nil {
 		if errors.Is(err, service.ErrOrderNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.order_not_found", nil)
